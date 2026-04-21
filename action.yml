@@ -1,0 +1,105 @@
+name: OctoScribe
+description: >
+  Downloads audio from Telegram and transcribes it using OpenAI Whisper or a
+  local backend. Git identity, SSH keys, and GPG signing must be configured
+  before this action runs (e.g. via octoleo/git-user@v2).
+
+inputs:
+  telegram_api_id:
+    description: 'Telegram API ID (from https://my.telegram.org)'
+    required: true
+  telegram_api_hash:
+    description: 'Telegram API hash (from https://my.telegram.org)'
+    required: true
+  telegram_phone:
+    description: 'Telegram phone number with country code (e.g. +27821234567)'
+    required: true
+  telegram_session_b64:
+    description: 'Base64-encoded Telegram .session file for non-interactive CI auth'
+    required: true
+  telegram_group:
+    description: 'Telegram group to archive (@username or numeric ID)'
+    required: true
+  openai_api_key:
+    description: 'OpenAI API key (required when transcribe_backend=openai)'
+    required: false
+    default: ''
+  data_repo_path:
+    description: 'Local path to the pre-cloned data repository'
+    required: false
+    default: './data'
+  transcribe_backend:
+    description: 'Transcription backend: openai or local'
+    required: false
+    default: 'openai'
+  command:
+    description: 'Pipeline command: run | download | transcribe | sync | status'
+    required: false
+    default: 'run'
+  no_push:
+    description: 'Set to "true" to skip the final git push'
+    required: false
+    default: 'false'
+  config_path:
+    description: 'Path to octoscribe.ini (optional, uses defaults if not set)'
+    required: false
+    default: ''
+  verbose:
+    description: 'Set to "true" to enable debug logging'
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Install OctoScribe dependencies
+      shell: bash
+      run: pip install -r "${{ github.action_path }}/requirements.txt"
+
+    - name: Run OctoScribe
+      shell: bash
+      env:
+        TELEGRAM_API_ID: ${{ inputs.telegram_api_id }}
+        TELEGRAM_API_HASH: ${{ inputs.telegram_api_hash }}
+        TELEGRAM_PHONE: ${{ inputs.telegram_phone }}
+        TELEGRAM_SESSION_B64: ${{ inputs.telegram_session_b64 }}
+        OPENAI_API_KEY: ${{ inputs.openai_api_key }}
+      run: |
+        CMD="python3 ${{ github.action_path }}/octoscribe.py"
+
+        # Add config path if provided
+        if [ -n "${{ inputs.config_path }}" ]; then
+          CMD="$CMD --config '${{ inputs.config_path }}'"
+        fi
+
+        # Add verbose flag
+        if [ "${{ inputs.verbose }}" = "true" ]; then
+          CMD="$CMD --verbose"
+        fi
+
+        # Add data repo path
+        CMD="$CMD --data-repo '${{ inputs.data_repo_path }}'"
+
+        # Add subcommand
+        CMD="$CMD ${{ inputs.command }}"
+
+        # Add group override
+        CMD="$CMD --group '${{ inputs.telegram_group }}'"
+
+        # Add backend override (only for run/transcribe commands)
+        if [ "${{ inputs.command }}" = "run" ] || [ "${{ inputs.command }}" = "transcribe" ]; then
+          CMD="$CMD --backend '${{ inputs.transcribe_backend }}'"
+        fi
+
+        # Add no-push flag
+        if [ "${{ inputs.no_push }}" = "true" ] && [ "${{ inputs.command }}" = "run" ]; then
+          CMD="$CMD --no-push"
+        fi
+
+        echo "Running: $CMD"
+        eval "$CMD"

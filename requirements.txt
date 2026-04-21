@@ -1,0 +1,69 @@
+# =============================================================================
+# OctoScribe — Python Dependencies
+# =============================================================================
+#
+# Install all dependencies into a virtual environment:
+#
+#   python3.11 -m venv .venv
+#   source .venv/bin/activate
+#   pip install -r requirements.txt
+#
+# Minimum versions are pinned for reproducibility. Use `pip install --upgrade`
+# or bump versions here when you need newer features.
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# Core runtime dependencies
+# -----------------------------------------------------------------------------
+
+# Telegram MTProto client — used to connect to groups and download audio.
+# https://github.com/LonamiWebs/Telethon
+telethon>=1.36.0
+
+# OpenAI Python SDK — used for the gpt-4o-transcribe transcription backend.
+# https://github.com/openai/openai-python
+openai>=1.30.0
+
+# Faster-Whisper — local CTranslate2-based Whisper inference.
+# Requires CTranslate2-compatible CUDA libraries for GPU acceleration.
+# https://github.com/SYSTRAN/faster-whisper
+faster-whisper>=1.0.3
+
+# Load .env files into os.environ before config parsing.
+# https://github.com/theskumar/python-dotenv
+python-dotenv>=1.0.1
+
+# Progress bars for download and transcription loops.
+# https://github.com/tqdm/tqdm
+tqdm>=4.66.0
+
+# Audio metadata (duration, bitrate, codec) without decoding the full file.
+# https://github.com/quodlibet/mutagen
+mutagen>=1.47.0
+
+# Anthropic SDK — reserved for a future LLM review / summarisation stage.
+# Not used in the current release; included now to avoid a separate install step.
+# https://github.com/anthropics/anthropic-sdk-python
+anthropic>=0.28.0
+
+
+# -----------------------------------------------------------------------------
+# Testing dependencies
+# -----------------------------------------------------------------------------
+
+# Core test runner.
+# https://github.com/pytest-dev/pytest
+pytest>=8.2.0
+
+# asyncio support for testing Telethon and other async code.
+# https://github.com/pytest-dev/pytest-asyncio
+pytest-asyncio>=0.23.0
+
+# unittest.mock integration and convenient mock fixtures.
+# https://github.com/pytest-dev/pytest-mock
+pytest-mock>=3.14.0
+
+# Coverage measurement and HTML/XML reporting.
+# https://github.com/pytest-dev/pytest-cov
+pytest-cov>=5.0.0

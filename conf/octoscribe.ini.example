@@ -1,0 +1,207 @@
+# =============================================================================
+# OctoScribe — Configuration File Template
+# =============================================================================
+#
+# Copy this file to conf/octoscribe.ini and adjust the settings for your setup:
+#
+#   cp conf/octoscribe.ini.example conf/octoscribe.ini
+#
+# IMPORTANT — SECRETS DO NOT BELONG HERE.
+# This file is for non-secret runtime settings only. API keys, tokens, phone
+# numbers, and any other credentials must be stored in .env (see conf/.env.example).
+# The actual conf/octoscribe.ini is listed in .gitignore so it cannot be
+# accidentally committed, but please be careful regardless.
+#
+# To use a non-default path for this file, set OCTOSCRIBE_CONFIG before running:
+#   OCTOSCRIBE_CONFIG=/path/to/custom.ini python octoscribe.py run
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# [telegram] — Which group to monitor
+# -----------------------------------------------------------------------------
+[telegram]
+
+# The Telegram group or channel to download audio from.
+# Accepted formats:
+#   @username          e.g. @my_church_sermons
+#   Numeric chat ID    e.g. -1001234567890  (useful for private groups)
+# To find a private group's chat ID, run:  python octoscribe.py debug
+group = @your_group_or_chat_id
+
+
+# -----------------------------------------------------------------------------
+# [download] — Audio download behaviour
+# -----------------------------------------------------------------------------
+[download]
+
+# Number of parallel download workers. Increase on fast connections; decrease
+# if you hit Telegram rate limits (FloodWaitError).
+# Range: 1–16  |  Default: 4
+workers = 4
+
+# Resume interrupted downloads. When true, partially downloaded files are
+# kept and the download picks up where it left off. When false, incomplete
+# files are deleted and restarted.
+# Default: true
+resume = true
+
+# Skip files that are already recorded in manifest.json (by Telegram message
+# ID). Setting this to false will re-download and re-transcribe everything,
+# which is expensive and rarely needed.
+# Default: true
+deduplicate = true
+
+
+# -----------------------------------------------------------------------------
+# [transcribe] — Transcription pipeline settings
+# -----------------------------------------------------------------------------
+[transcribe]
+
+# Transcription backend to use.
+# openai — Uses the OpenAI gpt-4o-transcribe model via the API. Requires
+#           OPENAI_API_KEY in your .env. Higher accuracy, costs money per
+#           minute of audio, no GPU needed.
+# local  — Uses Faster-Whisper running locally. Requires a CUDA-capable GPU
+#           for good throughput (CPU mode is very slow). Free after hardware.
+# Default: openai
+backend = openai
+
+# Model name passed to the active backend.
+# For openai backend:  gpt-4o-transcribe  (recommended)
+#                      whisper-1          (legacy, lower quality)
+# For local backend:   this setting is ignored; use [local_transcribe] model.
+model = gpt-4o-transcribe
+
+# BCP-47 language code for the primary language spoken in the audio.
+# Providing the correct language improves accuracy and speed.
+# Examples: en, af, fr, de, es, pt, zu, xh
+# Default: en
+language = en
+
+# Number of parallel transcription workers. For the openai backend this is
+# the number of concurrent API requests; respect your OpenAI tier rate limits.
+# For the local backend this should match the number of GPUs (usually 1).
+# Range: 1–8  |  Default: 4
+workers = 4
+
+# Number of times to retry a failed transcription before marking it as failed.
+# Retries use exponential back-off between retry_base_delay and retry_max_delay.
+# Default: 3
+retry_attempts = 3
+
+# Base delay in seconds for the first retry. Subsequent retries double this
+# value up to retry_max_delay.
+# Default: 2.5
+retry_base_delay = 2.5
+
+# Maximum delay in seconds between retries.
+# Default: 30.0
+retry_max_delay = 30.0
+
+
+# -----------------------------------------------------------------------------
+# [local_transcribe] — Faster-Whisper specific settings
+# -----------------------------------------------------------------------------
+# These settings are only used when transcribe.backend = local.
+[local_transcribe]
+
+# Whisper model size to load. Larger models are more accurate but slower and
+# require more VRAM.
+# Options: tiny, base, small, medium, large-v2, large-v3, large-v3-turbo
+# Default: large-v3
+model = large-v3
+
+# Device to run inference on.
+# cuda — NVIDIA GPU (recommended, ~10-20x faster than CPU)
+# cpu  — CPU only (very slow for large-v3; consider small or medium)
+# Default: cuda
+device = cuda
+
+# Quantisation / compute type. Trade-off between speed, VRAM usage, and
+# accuracy. Best choices per device:
+#   NVIDIA Ampere+ (RTX 30xx/40xx, A100): float16 or int8_float16
+#   Older NVIDIA GPUs:                    int8_float16 or int8
+#   CPU:                                  int8
+# Default: int8_float16
+compute_type = int8_float16
+
+# Beam search width. Higher values explore more hypotheses and often produce
+# better transcriptions at the cost of speed.
+# Range: 1–10  |  Default: 5
+beam_size = 5
+
+# Number of candidates sampled per step (temperature-based sampling). Only
+# relevant when temperature > 0. Mirrors the Whisper original setting.
+# Default: 5
+best_of = 5
+
+# Penalise repeated n-grams to reduce hallucinated loops. Values > 1.0
+# discourage repetition; 1.0 disables the penalty.
+# Default: 1.1
+repetition_penalty = 1.1
+
+# Enable Silero VAD (Voice Activity Detection) to skip silent sections. This
+# meaningfully reduces transcription time for recordings with long silences.
+# Default: true
+vad_filter = true
+
+# Minimum silence duration in milliseconds that VAD will treat as a gap.
+# Shorter values keep more marginal speech; longer values are more aggressive.
+# Default: 500
+vad_min_silence_ms = 500
+
+# Padding in milliseconds added around each detected speech segment.
+# Prevents clipping the first or last word of a sentence.
+# Default: 400
+vad_speech_pad_ms = 400
+
+
+# -----------------------------------------------------------------------------
+# [data_repo] — The separate git repository for audio and transcription data
+# -----------------------------------------------------------------------------
+[data_repo]
+
+# Path to the local data repository. This repository stores all downloaded
+# audio files, transcription text files, and the manifest.json index.
+# It is intentionally separate from the code repository so that the large
+# binary audio files never end up inside the OctoScribe source tree.
+#
+# The ~ shortcut expands to the current user's home directory.
+# Default: ~/.octoscribe/data
+path = ~/.octoscribe/data
+
+# Git branch to use inside the data repository.
+# Default: main
+branch = main
+
+# Automatically commit and push the data repository after each successful
+# pipeline run. Requires DATA_REPO_URL to be set in .env (or the remote
+# to have been added manually).
+# Default: true
+auto_push = true
+
+
+# -----------------------------------------------------------------------------
+# [paths] — Subdirectory and file names inside the data repository
+# -----------------------------------------------------------------------------
+# All paths here are relative to data_repo.path.
+[paths]
+
+# Subdirectory for downloaded audio files.
+# Default: audio
+audio_dir = audio
+
+# Subdirectory for plain-text transcription files (one .txt per audio file).
+# Default: transcriptions
+transcriptions_dir = transcriptions
+
+# Name of the manifest JSON file that tracks every processed file.
+# Default: manifest.json
+manifest_file = manifest.json
+
+# Directory for Telegram session files. These files contain your Telegram
+# login session and are highly sensitive — treat them like passwords.
+# This path is relative to the OctoScribe project root, NOT the data repo.
+# Default: .session
+session_dir = .session

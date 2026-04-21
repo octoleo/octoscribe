@@ -1,0 +1,175 @@
+# =============================================================================
+# OctoScribe — .gitignore
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# SECRETS — NEVER COMMIT THESE
+# -----------------------------------------------------------------------------
+
+# The real .env file containing all API keys and credentials.
+# The template (conf/.env.example) IS tracked; the live file is NOT.
+.env
+
+# The live INI config (may contain paths that reveal system layout).
+# The template (conf/*.example) IS tracked; the live file is NOT.
+conf/octoscribe.ini
+
+# Match any .ini in conf/ that is NOT an .example, just in case someone
+# creates a variant (e.g. conf/production.ini).
+conf/*.ini
+!conf/*.ini.example
+
+# Legacy ini name from earlier versions of the project.
+transcribe.ini
+
+
+# -----------------------------------------------------------------------------
+# Telegram session files
+# -----------------------------------------------------------------------------
+# Session files store your authenticated Telegram login. They are as sensitive
+# as your account password. Never commit them.
+.session/
+*.session
+*.session-journal
+
+
+# -----------------------------------------------------------------------------
+# Data repository (if accidentally cloned inside the project root)
+# -----------------------------------------------------------------------------
+# The data repo belongs at ~/.octoscribe/data (or the configured path).
+# If it ends up here, ignore it.
+/data/
+
+# Legacy local media directories from earlier versions.
+/transcriptions/
+/transcriptions_local/
+/audio_files/
+
+
+# -----------------------------------------------------------------------------
+# Python runtime artefacts
+# -----------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.eggs/
+*.egg-info/
+*.egg
+dist/
+build/
+wheels/
+sdist/
+MANIFEST
+
+
+# -----------------------------------------------------------------------------
+# Virtual environments
+# -----------------------------------------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+.env.bak
+
+
+# -----------------------------------------------------------------------------
+# pytest and coverage
+# -----------------------------------------------------------------------------
+.pytest_cache/
+.cache/
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+nosetests.xml
+test-results/
+
+
+# -----------------------------------------------------------------------------
+# Type checkers and linters
+# -----------------------------------------------------------------------------
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pytype/
+.ruff_cache/
+
+
+# -----------------------------------------------------------------------------
+# Jupyter / IPython
+# -----------------------------------------------------------------------------
+.ipynb_checkpoints/
+*.ipynb
+
+
+# -----------------------------------------------------------------------------
+# IDE and editor files
+# -----------------------------------------------------------------------------
+
+# Visual Studio Code
+.vscode/
+
+# JetBrains IDEs (PyCharm, IntelliJ, etc.)
+.idea/
+*.iml
+.claude
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Vim / Neovim
+*.swp
+*.swo
+*~
+Session.vim
+.netrwhist
+
+# Emacs
+\#*\#
+.\#*
+
+
+# -----------------------------------------------------------------------------
+# Operating system files
+# -----------------------------------------------------------------------------
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+.Spotlight-V100
+.Trashes
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+.directory
+
+
+# -----------------------------------------------------------------------------
+# Temporary and scratch files
+# -----------------------------------------------------------------------------
+*.tmp
+*.temp
+*.bak
+*.orig
+*.log
+*.pid
+scratch/
+tmp/
