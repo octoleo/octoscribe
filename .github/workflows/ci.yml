@@ -25,10 +25,10 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      - name: Install test dependencies
+      - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install pytest pytest-asyncio pytest-mock pytest-cov python-dotenv
+          pip install -r requirements.txt
 
       - name: Run tests
         run: |
