@@ -12,8 +12,9 @@ OctoScribe is a Python 3.11+ CLI pipeline that monitors a Telegram group, downlo
 4. [Commands Reference](#commands-reference)
 5. [Data Repository](#data-repository)
 6. [Transcription Backends](#transcription-backends)
-7. [Testing](#testing)
-8. [Project Structure](#project-structure)
+7. [GitHub Actions Workflow](#github-actions-workflow)
+8. [Testing](#testing)
+9. [Project Structure](#project-structure)
 
 ---
 
@@ -333,6 +334,122 @@ Runs the `large-v3` Whisper model locally using the CTranslate2 runtime.
 | Speed | Fast (API, parallelised) | Fast with GPU, slow on CPU |
 | Privacy | Audio sent to OpenAI | Audio stays local |
 | Setup complexity | Low | Medium–High |
+
+---
+
+## GitHub Actions Workflow
+
+OctoScribe ships with a composite GitHub Action (`action.yml` at the repository root) that you can drop into any workflow as `octoleo/octoscribe@v1`. The action installs Python, installs OctoScribe's dependencies, and runs the pipeline against a pre-cloned data repository.
+
+A complete reference workflow lives at [`.github/workflows/pipeline.yml`](.github/workflows/pipeline.yml) — copy it into your own repository, replace the secrets and variables, and you have a fully scheduled archive pipeline.
+
+### Required companion action: `octoleo/git-user@v2`
+
+The OctoScribe pipeline writes commits and pushes them to the data repository. Before `octoleo/octoscribe@v1` runs, the workflow **must** configure a git identity, an SSH key (so the data-repo clone and push succeed over `git@github.com`), and optionally a GPG key for signed commits. That configuration is provided by [`octoleo/git-user@v2`](https://github.com/octoleo/git-user).
+
+`octoleo/git-user@v2` is what makes `git clone git@github.com:...` and `git push` work non-interactively inside the runner — without it, OctoScribe will fail to clone the data repository and will not be able to push the new audio and transcriptions back.
+
+### Required secrets and variables
+
+Configure these in **Settings → Secrets and variables → Actions** in the repository that hosts your workflow.
+
+**Secrets** (under *Repository secrets*):
+
+| Secret | Used by | Description |
+|---|---|---|
+| `GPG_KEY` | `octoleo/git-user@v2` | ASCII-armoured private GPG key for signed commits. |
+| `GPG_USER` | `octoleo/git-user@v2` | Email address associated with the GPG key. |
+| `SSH_KEY` | `octoleo/git-user@v2` | Private SSH key authorised to push to the data repository. |
+| `SSH_PUB` | `octoleo/git-user@v2` | Matching public SSH key. |
+| `GIT_USER` | `octoleo/git-user@v2` | Display name for git commits (e.g. `OctoScribe Bot`). |
+| `GIT_EMAIL` | `octoleo/git-user@v2` | Email address for git commits. |
+| `TELEGRAM_API_ID` | `octoleo/octoscribe@v1` | Telegram API ID from [my.telegram.org](https://my.telegram.org). |
+| `TELEGRAM_API_HASH` | `octoleo/octoscribe@v1` | Telegram API hash from [my.telegram.org](https://my.telegram.org). |
+| `TELEGRAM_PHONE` | `octoleo/octoscribe@v1` | Phone number for the Telegram account, with country code. |
+| `TELEGRAM_SESSION_B64` | `octoleo/octoscribe@v1` | Base64-encoded session file produced by `python octoscribe.py session export`. See [CI/CD: Setting up TELEGRAM_SESSION_B64](#cicd-setting-up-telegram_session_b64). |
+| `OPENAI_API_KEY` | `octoleo/octoscribe@v1` | OpenAI API key. Required only when `transcribe_backend` is `openai`. |
+
+**Variables** (under *Repository variables*):
+
+| Variable | Description |
+|---|---|
+| `DATA_REPO_ORG` | GitHub org/user that owns the data repository (e.g. `your-org`). |
+| `DATA_REPO_NAME` | Name of the data repository (e.g. `sermons-data`). |
+| `TELEGRAM_GROUP` | Group to archive — `@username` or numeric chat ID. |
+| `TRANSCRIBE_BACKEND` | Optional — `openai` (default) or `local`. |
+
+### Minimal example workflow
+
+```yaml
+name: OctoScribe Pipeline
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'   # Mondays at 06:00 UTC
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Run Pipeline
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Setup GitHub User Details
+        uses: octoleo/git-user@v2
+        with:
+          gpg-key:   ${{ secrets.GPG_KEY }}
+          gpg-user:  ${{ secrets.GPG_USER }}
+          ssh-key:   ${{ secrets.SSH_KEY }}
+          ssh-pub:   ${{ secrets.SSH_PUB }}
+          git-user:  ${{ secrets.GIT_USER }}
+          git-email: ${{ secrets.GIT_EMAIL }}
+
+      - name: Clone Data Repository
+        run: |
+          /bin/git clone git@github.com:${{ vars.DATA_REPO_ORG }}/${{ vars.DATA_REPO_NAME }}.git ./data
+
+      - name: Run OctoScribe
+        uses: octoleo/octoscribe@v1
+        with:
+          telegram_api_id:      ${{ secrets.TELEGRAM_API_ID }}
+          telegram_api_hash:    ${{ secrets.TELEGRAM_API_HASH }}
+          telegram_phone:       ${{ secrets.TELEGRAM_PHONE }}
+          telegram_session_b64: ${{ secrets.TELEGRAM_SESSION_B64 }}
+          telegram_group:       ${{ vars.TELEGRAM_GROUP }}
+          openai_api_key:       ${{ secrets.OPENAI_API_KEY }}
+          data_repo_path:       ./data
+          transcribe_backend:   ${{ vars.TRANSCRIBE_BACKEND || 'openai' }}
+          command:              run
+```
+
+### Action inputs
+
+`octoleo/octoscribe@v1` accepts the following inputs (full schema in [`action.yml`](action.yml)):
+
+| Input | Required | Default | Description |
+|---|---|---|---|
+| `telegram_api_id` | yes | — | Telegram API ID. |
+| `telegram_api_hash` | yes | — | Telegram API hash. |
+| `telegram_phone` | yes | — | Telegram phone number with country code. |
+| `telegram_session_b64` | yes | — | Base64-encoded `.session` file for non-interactive auth. |
+| `telegram_group` | yes | — | `@username` or numeric chat ID of the group to archive. |
+| `openai_api_key` | no | `''` | OpenAI key. Required when `transcribe_backend=openai`. |
+| `data_repo_path` | no | `./data` | Local path to the pre-cloned data repository. |
+| `transcribe_backend` | no | `openai` | `openai` or `local`. |
+| `command` | no | `run` | One of `run`, `download`, `transcribe`, `sync`, `status`. |
+| `no_push` | no | `false` | `true` to skip the final `git push` (dry-run). |
+| `config_path` | no | `''` | Path to a custom `octoscribe.ini`. |
+| `verbose` | no | `false` | `true` enables debug logging. |
+
+### Pipeline order matters
+
+The three steps run in a specific order for a reason:
+
+1. **`octoleo/git-user@v2`** — installs the SSH key, GPG key, and `git config` so subsequent git operations succeed.
+2. **Clone data repository** — uses the SSH key from step 1 to clone the data repo into `./data`. OctoScribe expects the data repo to already exist on disk.
+3. **`octoleo/octoscribe@v1`** — runs the pipeline against the cloned data repo and uses the git identity from step 1 to commit and push results.
+
+Skipping or reordering any of these will cause the pipeline to fail (no SSH key → clone fails; no git identity → commit fails; no cloned data repo → OctoScribe has nowhere to write).
 
 ---
 
