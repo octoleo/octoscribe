@@ -8,12 +8,10 @@ hash, resumes from manifest, and records all metadata into the manifest.
 from __future__ import annotations
 
 import asyncio
-import base64
 import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from telethon import TelegramClient
 from telethon.tl.types import (
@@ -31,6 +29,12 @@ from src.audio import (
 )
 from src.config import Config
 from src.manifest import Manifest
+from src.persistence import PeriodicSaver
+from src.telegram_client import (
+    resolve_group_entity,
+    restore_session_from_env,
+    session_base_path,
+)
 
 log = logging.getLogger(__name__)
 
@@ -67,8 +71,6 @@ MIME_TO_EXT: dict[str, str] = {
     "application/ogg": ".ogg",
     "audio/opus": ".opus",
 }
-
-_MANIFEST_SAVE_INTERVAL = 10
 
 # ---------------------------------------------------------------------------
 # Value objects
@@ -278,37 +280,24 @@ class TelegramDownloader:
     @staticmethod
     def _restore_session_from_env(session_dir: Path) -> bool:
         """
-        Restore a Telegram session file from the TELEGRAM_SESSION_B64 env var.
+        Restore a Telegram session file from the ``TELEGRAM_SESSION_B64`` env var.
 
-        If the environment variable is set, its base64 content is decoded and
-        written to ``session_dir / "octoscribe.session"``.  This enables
-        non-interactive authentication in CI/CD environments (GitHub Actions)
-        where interactive phone-code login is not possible.
-
-        Returns True if the session was restored, False if the env var is not set.
-        Called automatically by __init__ before TelegramClient is created.
+        Thin compatibility shim that delegates to
+        :func:`src.telegram_client.restore_session_from_env`.  Retained as a
+        staticmethod because it is part of this class's established surface and
+        is exercised directly by the test suite.  See the shared helper for the
+        full contract.
         """
-        b64 = os.environ.get("TELEGRAM_SESSION_B64", "").strip()
-        if not b64:
-            return False
-        try:
-            session_bytes = base64.b64decode(b64)
-        except Exception as exc:
-            log.warning("TELEGRAM_SESSION_B64 is set but could not be decoded: %s", exc)
-            return False
-        session_dir.mkdir(parents=True, exist_ok=True)
-        session_file = session_dir / "octoscribe.session"
-        session_file.write_bytes(session_bytes)
-        log.info("Telegram session restored from TELEGRAM_SESSION_B64 (%d bytes)", len(session_bytes))
-        return True
+        return restore_session_from_env(session_dir)
 
     def __init__(self, config: Config, manifest: Manifest) -> None:
         self._config = config
         self._manifest = manifest
-        self._restore_session_from_env(config.telegram.session_dir)
-        session_path = str(config.telegram.session_dir / "octoscribe")
+        # Restore a CI-provided session (if any) before the client opens the
+        # session file, so non-interactive authentication just works.
+        restore_session_from_env(config.telegram.session_dir)
         self._client = TelegramClient(
-            session_path,
+            session_base_path(config.telegram.session_dir),
             config.telegram.api_id,
             config.telegram.api_hash,
         )
@@ -349,22 +338,17 @@ class TelegramDownloader:
         Scan all messages in the configured group and download new audio files.
 
         Respects ``config.download.resume`` (skip if already downloaded) and
-        ``config.download.deduplicate`` (remove duplicate files by hash).
-        Saves the manifest every :data:`_MANIFEST_SAVE_INTERVAL` downloads
-        and once more at the end.
+        ``config.download.deduplicate`` (remove duplicate files by hash).  A
+        :class:`~src.persistence.PeriodicSaver` flushes the manifest at a fixed
+        cadence, with a final authoritative save at the end.
 
         Returns a :class:`DownloadStats` summary.
         """
         stats = DownloadStats()
         cfg = self._config
 
-        # Resolve the group entity
-        group_raw = cfg.telegram.group.strip()
-        if group_raw.lstrip("-").isdigit():
-            entity = await self._client.get_entity(int(group_raw))
-        else:
-            entity = await self._client.get_entity(group_raw)
-
+        # Resolve the group entity (username, link, or numeric chat ID).
+        entity = await resolve_group_entity(self._client, cfg.telegram.group)
         log.info("Resolved group: %s", getattr(entity, "title", entity))
 
         # Collect all audio messages first
@@ -397,26 +381,21 @@ class TelegramDownloader:
         cfg.download.audio_dir.mkdir(parents=True, exist_ok=True)
 
         # Build and run download tasks concurrently
-        save_counter = 0
+        saver = PeriodicSaver(self._manifest)
 
         async def _process(msg: object) -> None:
-            nonlocal save_counter
             result = await self._download_one(msg)
             match result:
                 case "downloaded":
                     stats.downloaded += 1
+                    if saver.tick():
+                        log.debug("Manifest saved (periodic, %d downloaded)", saver.count)
                 case "skipped":
                     stats.skipped += 1
                 case "duplicate":
                     stats.duplicate += 1
                 case "failed":
                     stats.failed += 1
-
-            if result == "downloaded":
-                save_counter += 1
-                if save_counter % _MANIFEST_SAVE_INTERVAL == 0:
-                    self._manifest.save()
-                    log.debug("Manifest saved (periodic, %d downloaded)", save_counter)
 
         tasks = [_process(msg) for msg in audio_messages]
         await asyncio.gather(*tasks)

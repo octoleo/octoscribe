@@ -533,6 +533,10 @@ pytest -m "not slow"
 
 ## Project Structure
 
+For the design rationale behind this layout — how the SOLID principles, the
+Strategy pattern, and the transcription stability guarantees are applied — see
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+
 ```
 octoscribe/
 |
@@ -543,11 +547,26 @@ octoscribe/
 |   |-- octoscribe.ini.example Template for runtime config. Copy to conf/octoscribe.ini.
 |
 |-- src/
-|   |-- config.py              Loads and validates .env + INI; exposes a typed Config object.
+|   |-- config/               Configuration package (split by responsibility):
+|   |   |-- models.py            Typed, logic-free config value objects.
+|   |   |-- helpers.py           Pure parsing/validation helpers (_parse_bool, ...).
+|   |   |-- loader.py            Multi-source loader: precedence + validation.
+|   |   |-- root.py              The aggregate Config object and its load() factory.
+|   |-- transcribe/           Transcription package (split by responsibility):
+|   |   |-- prompt.py            The verbatim instruction string.
+|   |   |-- normalize.py         Whitespace-only, word-preserving normalisation.
+|   |   |-- results.py           TranscriptionResult / BatchStats value objects.
+|   |   |-- transcriber.py       Batch orchestrator + backend factory.
+|   |   |-- backends/            Strategy interface + implementations:
+|   |   |   |-- base.py            The TranscriptionBackend interface.
+|   |   |   |-- retry.py           Reusable RetryPolicy + ErrorClassifier.
+|   |   |   |-- openai_backend.py  OpenAI gpt-4o-transcribe backend.
+|   |   |   |-- local_whisper.py   Local Faster-Whisper backend.
 |   |-- audio.py               Framework-agnostic audio helpers shared by the sources.
+|   |-- persistence.py         Shared atomic writes + periodic-save helper.
+|   |-- telegram_client.py     Shared Telegram session + entity helpers.
 |   |-- telegram.py            Telethon wrapper: connects, lists messages, downloads audio.
 |   |-- folder.py              Local folder importer: scans a folder, dedups, queues audio.
-|   |-- transcribe.py          Abstract base + OpenAI and Faster-Whisper implementations.
 |   |-- repository.py          Manages the data git repository: init, commit, push.
 |   |-- manifest.py            Reads and writes manifest.json; tracks processing state.
 |   |-- debug.py               Telegram connection / message metadata inspector.

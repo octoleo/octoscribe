@@ -30,11 +30,9 @@ from src.audio import (
 )
 from src.config import Config
 from src.manifest import Manifest
+from src.persistence import PeriodicSaver
 
 log = logging.getLogger(__name__)
-
-# How many imports between periodic manifest saves.
-_MANIFEST_SAVE_INTERVAL = 10
 
 
 # ---------------------------------------------------------------------------
@@ -117,8 +115,9 @@ class FolderImporter:
 
         Respects ``config.download.resume`` (skip files already imported in a
         previous run) and ``config.download.deduplicate`` (skip files whose
-        content matches one already imported this run).  Saves the manifest
-        every :data:`_MANIFEST_SAVE_INTERVAL` imports and once more at the end.
+        content matches one already imported this run).  A
+        :class:`~src.persistence.PeriodicSaver` flushes the manifest at a fixed
+        cadence, and a final authoritative save runs once more at the end.
 
         Returns an :class:`ImportStats` summary.
         """
@@ -147,16 +146,14 @@ class FolderImporter:
         # Ensure audio output directory exists.
         cfg.download.audio_dir.mkdir(parents=True, exist_ok=True)
 
-        save_counter = 0
+        saver = PeriodicSaver(self._manifest)
         for path in files:
             result = self._import_one(path)
             match result:
                 case "imported":
                     stats.imported += 1
-                    save_counter += 1
-                    if save_counter % _MANIFEST_SAVE_INTERVAL == 0:
-                        self._manifest.save()
-                        log.debug("Manifest saved (periodic, %d imported)", save_counter)
+                    if saver.tick():
+                        log.debug("Manifest saved (periodic, %d imported)", saver.count)
                 case "skipped":
                     stats.skipped += 1
                 case "duplicate":

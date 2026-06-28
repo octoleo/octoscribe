@@ -16,9 +16,13 @@ from telethon.tl.types import MessageMediaDocument
 
 from src.config import Config
 from src.telegram import (
-    TelegramDownloader,
     get_audio_metadata,
     is_audio,
+)
+from src.telegram_client import (
+    resolve_group_entity,
+    restore_session_from_env,
+    session_base_path,
 )
 
 log = logging.getLogger(__name__)
@@ -41,10 +45,11 @@ class DebugInspector:
         self._config = config
         self._scan_limit = scan_limit
         config.telegram.session_dir.mkdir(parents=True, exist_ok=True)
-        TelegramDownloader._restore_session_from_env(config.telegram.session_dir)
-        session_path = str(config.telegram.session_dir / "octoscribe")
+        # Reuse the shared session bootstrap rather than reaching into the
+        # downloader's internals — the inspector and downloader are peers.
+        restore_session_from_env(config.telegram.session_dir)
         self._client = TelegramClient(
-            session_path,
+            session_base_path(config.telegram.session_dir),
             config.telegram.api_id,
             config.telegram.api_hash,
         )
@@ -73,12 +78,8 @@ class DebugInspector:
         """Resolve the group, iterate messages, dump up to scan_limit audio files."""
         cfg = self._config
 
-        # Resolve the group entity.
-        group_raw = cfg.telegram.group.strip()
-        if group_raw.lstrip("-").isdigit():
-            entity = await self._client.get_entity(int(group_raw))
-        else:
-            entity = await self._client.get_entity(group_raw)
+        # Resolve the group entity (username, link, or numeric chat ID).
+        entity = await resolve_group_entity(self._client, cfg.telegram.group)
 
         group_title = getattr(entity, "title", str(entity))
         group_id = getattr(entity, "id", None)

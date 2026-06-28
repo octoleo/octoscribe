@@ -1,15 +1,18 @@
 """
-OctoScribe configuration loader.
+src/config/loader.py — Multi-source configuration loader.
 
-Loading priority (highest wins):
-  1. CLI overrides (kwargs passed to Config.load())
-  2. Environment variables (including those sourced from a .env file)
-  3. INI file values
-  4. Built-in defaults
+:class:`_ConfigLoader` is the single place that knows *how* an OctoScribe
+configuration is assembled.  It applies the documented precedence
 
-Secrets are sourced exclusively from environment variables (never from the INI file).
-The .env file is loaded first so that its values appear in os.environ; thereafter
-the same env-var rules apply.
+    CLI overrides  >  environment / .env  >  INI file  >  built-in defaults
+
+builds each typed section (see :mod:`src.config.models`), validates the result,
+and returns a :class:`~src.config.root.Config`.  Secrets are read exclusively
+from the environment, never from the INI file.
+
+This loader is deliberately internal (underscore-prefixed): callers go through
+:meth:`Config.load`, which keeps the public surface small and the assembly
+strategy swappable.
 """
 
 from __future__ import annotations
@@ -17,11 +20,25 @@ from __future__ import annotations
 import configparser
 import logging
 import os
-import sys
 import warnings
-from dataclasses import dataclass, field, fields, asdict
 from pathlib import Path
 from typing import Any, Optional
+
+from src.config.helpers import (
+    _die,
+    _optional_int,
+    _parse_bool,
+    _require_int,
+    _resolve_path,
+)
+from src.config.models import (
+    DataRepoConfig,
+    DownloadConfig,
+    SourceConfig,
+    TelegramConfig,
+    TranscribeConfig,
+)
+from src.config.root import Config
 
 try:
     from dotenv import load_dotenv  # python-dotenv
@@ -81,175 +98,6 @@ manifest_file = manifest.json
 session_dir = .session
 """
 
-# ---------------------------------------------------------------------------
-# Sub-dataclasses
-# ---------------------------------------------------------------------------
-
-@dataclass
-class SourceConfig:
-    """Audio source selection: a Telegram group or a local folder."""
-
-    mode: str                 # "telegram" | "folder"
-    folder: Optional[Path]    # local folder to import from when mode == "folder"
-    recursive: bool           # scan the folder recursively for audio files
-
-
-@dataclass
-class TelegramConfig:
-    """Telegram client credentials and target group."""
-
-    api_id: Optional[int]   # required in telegram mode; may be None in folder mode
-    api_hash: str
-    phone: str
-    group: str          # INI [telegram] group
-    session_dir: Path   # where to store .session files
-
-
-@dataclass
-class DownloadConfig:
-    """Audio download behaviour."""
-
-    workers: int
-    resume: bool
-    deduplicate: bool
-    audio_dir: Path
-    manifest_file: Path
-
-
-@dataclass
-class TranscribeConfig:
-    """Transcription pipeline settings (both OpenAI and local Whisper)."""
-
-    backend: str                 # "openai" | "local"
-    model: str                   # e.g. "gpt-4o-transcribe"
-    language: str                # e.g. "en"
-    workers: int
-    retry_attempts: int
-    retry_base_delay: float
-    retry_max_delay: float
-    api_key: Optional[str]       # from env OPENAI_API_KEY
-
-    # Local Whisper options
-    local_model: str             # e.g. "large-v3"
-    device: str                  # "cuda" | "cpu"
-    compute_type: str            # e.g. "int8_float16"
-    beam_size: int
-    best_of: int
-    repetition_penalty: float
-    vad_filter: bool
-    vad_min_silence_ms: int
-    vad_speech_pad_ms: int
-
-    transcriptions_dir: Path
-    manifest_file: Path
-
-
-@dataclass
-class DataRepoConfig:
-    """Git data-repository settings."""
-
-    url: Optional[str]   # from env DATA_REPO_URL
-    path: Path           # local clone path
-    branch: str
-    auto_push: bool
-
-
-# ---------------------------------------------------------------------------
-# Top-level Config
-# ---------------------------------------------------------------------------
-
-@dataclass
-class Config:
-    """
-    Root configuration object for OctoScribe.
-
-    Instantiate via ``Config.load()`` rather than directly.
-    """
-
-    telegram: TelegramConfig
-    download: DownloadConfig
-    transcribe: TranscribeConfig
-    data_repo: DataRepoConfig
-    ini_path: Path
-    # Defaulted so existing call sites that predate the source feature keep
-    # working; Config.load() always sets this explicitly.
-    source: SourceConfig = field(
-        default_factory=lambda: SourceConfig(mode="telegram", folder=None, recursive=True)
-    )
-
-    # ------------------------------------------------------------------
-    # Public factory
-    # ------------------------------------------------------------------
-
-    @classmethod
-    def load(
-        cls,
-        ini_path: Optional[str | Path] = None,
-        env_file: Optional[str | Path] = None,
-        **overrides: Any,
-    ) -> "Config":
-        """
-        Load configuration from all sources and return a validated ``Config``.
-
-        Parameters
-        ----------
-        ini_path:
-            Path to the INI file.  Overridden by the ``OCTOSCRIBE_CONFIG``
-            environment variable (which may itself be set in the .env file).
-        env_file:
-            Path to the .env file.  Overridden by the ``OCTOSCRIBE_ENV``
-            environment variable.  Defaults to ``.env`` in the current
-            working directory.
-        **overrides:
-            Flat key=value pairs that override everything else.  Keys use
-            dot notation, e.g. ``telegram__group="my-group"`` (double
-            underscore as separator) or simply ``group="my-group"`` for
-            top-level keys.  Section-prefixed keys are preferred to avoid
-            ambiguity, e.g. ``download__workers=8``.
-        """
-        loader = _ConfigLoader(ini_path=ini_path, env_file=env_file, overrides=overrides)
-        return loader.build()
-
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-
-    def redacted_repr(self) -> str:
-        """Return a human-readable string with all secret values replaced by ***."""
-        _SECRET_FIELDS = {
-            ("telegram", "api_hash"),
-            ("telegram", "phone"),
-            ("telegram", "api_id"),
-            ("transcribe", "api_key"),
-            ("data_repo", "url"),
-        }
-
-        lines: list[str] = ["Config("]
-
-        def _fmt_sub(section_name: str, sub_obj: Any) -> None:
-            lines.append(f"  {section_name}=(")
-            for f in fields(sub_obj):  # type: ignore[arg-type]
-                val = getattr(sub_obj, f.name)
-                if (section_name, f.name) in _SECRET_FIELDS and val is not None:
-                    display = "***"
-                else:
-                    display = repr(val)
-                lines.append(f"    {f.name}={display},")
-            lines.append("  ),")
-
-        _fmt_sub("source", self.source)
-        _fmt_sub("telegram", self.telegram)
-        _fmt_sub("download", self.download)
-        _fmt_sub("transcribe", self.transcribe)
-        _fmt_sub("data_repo", self.data_repo)
-        lines.append(f"  ini_path={self.ini_path!r},")
-        lines.append(")")
-        return "\n".join(lines)
-
-
-# ---------------------------------------------------------------------------
-# Internal loader  (not part of the public API)
-# ---------------------------------------------------------------------------
 
 class _ConfigLoader:
     """Encapsulates the multi-source loading logic."""
@@ -681,7 +529,9 @@ class _ConfigLoader:
             _die(errors)
 
         # Non-fatal warning: data_repo inside the project directory.
-        project_dir = Path(__file__).parent.parent.resolve()
+        # __file__ is src/config/loader.py, so the project root is three
+        # levels up (src/config -> src -> project root).
+        project_dir = Path(__file__).resolve().parents[2]
         try:
             data_repo.path.relative_to(project_dir)
             warnings.warn(
@@ -692,75 +542,3 @@ class _ConfigLoader:
             )
         except ValueError:
             pass  # Good – it is outside the project directory.
-
-
-# ---------------------------------------------------------------------------
-# Module-level helpers
-# ---------------------------------------------------------------------------
-
-def _require_int(value: Any, name: str) -> int:
-    """Parse *value* as an integer, or call sys.exit with a clear message."""
-    if value == "" or value is None:
-        _die([
-            f"{name} is required but not set. "
-            "Export it as an environment variable or add it to your .env file."
-        ])
-    try:
-        return int(value)
-    except (ValueError, TypeError):
-        _die([
-            f"{name} must be a valid integer, got {value!r}. "
-            "Check your environment variable or .env file."
-        ])
-
-
-def _optional_int(value: Any, name: str) -> Optional[int]:
-    """
-    Parse *value* as an integer when present.
-
-    Returns ``None`` when *value* is empty/unset.  A present-but-invalid value
-    is logged and treated as unset rather than fatal, because the caller has
-    indicated the field is not required in the current mode.
-    """
-    if value == "" or value is None:
-        return None
-    try:
-        return int(value)
-    except (ValueError, TypeError):
-        log.warning("%s is set but is not a valid integer (%r); ignoring.", name, value)
-        return None
-
-
-def _parse_bool(value: Any) -> bool:
-    """Parse a boolean from a string, int, or bool."""
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, int):
-        return bool(value)
-    s = str(value).strip().lower()
-    if s in {"1", "true", "yes", "on"}:
-        return True
-    if s in {"0", "false", "no", "off"}:
-        return False
-    raise ValueError(f"Cannot parse boolean from {value!r}")
-
-
-def _resolve_path(raw: str | Path, base: Path) -> Path:
-    """
-    Return an absolute path.
-
-    If *raw* is already absolute (or starts with ``~``), expand and return it
-    as-is.  Otherwise resolve it relative to *base*.
-    """
-    p = Path(raw).expanduser()
-    if p.is_absolute():
-        return p.resolve()
-    return (base / p).resolve()
-
-
-def _die(errors: list[str]) -> None:
-    """Print all error messages and exit with status 1."""
-    print("OctoScribe configuration error(s):", file=sys.stderr)
-    for msg in errors:
-        print(f"  • {msg}", file=sys.stderr)
-    sys.exit(1)

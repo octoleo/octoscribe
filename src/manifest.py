@@ -8,11 +8,12 @@ The manifest lives in the data repository and is version-controlled.
 from __future__ import annotations
 
 import json
-import os
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from src.persistence import atomic_write_text
 
 
 class Manifest:
@@ -217,24 +218,14 @@ class Manifest:
         """
         Atomically write the manifest to disk.
 
-        Writes to a .tmp sibling file, then uses os.replace() to
-        atomically rename it to the target path. Keys are sorted for
-        stable diffs in git.
+        Serialises the in-memory data with keys sorted (for stable, reviewable
+        git diffs) and delegates the crash-safe tmp-write-then-rename to
+        :func:`src.persistence.atomic_write_text`, so the manifest and the
+        transcript writer share identical durability guarantees.
         """
         with self._lock:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            tmp_path = self._path.with_suffix(".tmp")
-            try:
-                content = json.dumps(self._data, indent=2, sort_keys=True, ensure_ascii=False)
-                tmp_path.write_text(content, encoding="utf-8")
-                os.replace(tmp_path, self._path)
-            except Exception:
-                # Clean up the temp file if something went wrong before the rename.
-                try:
-                    tmp_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                raise
+            content = json.dumps(self._data, indent=2, sort_keys=True, ensure_ascii=False)
+            atomic_write_text(self._path, content)
 
     def reload(self) -> None:
         """Re-read the manifest from disk, discarding any unsaved in-memory changes."""

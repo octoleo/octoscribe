@@ -26,7 +26,6 @@ import logging
 import os
 import sys
 from datetime import datetime
-from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Logging setup
@@ -330,6 +329,24 @@ def acquire_audio(config, manifest):
 # Command implementations
 # ---------------------------------------------------------------------------
 
+def _maybe_print_dry_run(args: argparse.Namespace, manifest) -> bool:
+    """
+    Handle the ``--dry-run`` flag shared by ``run`` and ``transcribe``.
+
+    When the flag is set, print the files currently pending transcription and
+    return ``True`` so the caller can return early.  Returns ``False`` (and
+    prints nothing) otherwise.  Centralised here so the two commands cannot
+    drift apart.
+    """
+    if not getattr(args, "dry_run", False):
+        return False
+    pending = manifest.pending_transcription()
+    print(f"Dry run — {len(pending)} file(s) pending transcription:")
+    for entry in pending:
+        print(f"  {entry.get('filename', '(unknown)')}")
+    return True
+
+
 def cmd_run(args: argparse.Namespace, config) -> None:
     """Full pipeline: sync → download → transcribe → commit/push."""
     from src.manifest import Manifest
@@ -348,11 +365,7 @@ def cmd_run(args: argparse.Namespace, config) -> None:
     manifest = Manifest(config.download.manifest_file)
 
     # 3. Acquire audio from the configured source.
-    if getattr(args, "dry_run", False):
-        pending = manifest.pending_transcription()
-        print(f"Dry run — {len(pending)} file(s) pending transcription:")
-        for entry in pending:
-            print(f"  {entry.get('filename', '(unknown)')}")
+    if _maybe_print_dry_run(args, manifest):
         return
 
     try:
@@ -413,11 +426,7 @@ def cmd_transcribe(args: argparse.Namespace, config) -> None:
 
     manifest = Manifest(config.download.manifest_file)
 
-    if getattr(args, "dry_run", False):
-        pending = manifest.pending_transcription()
-        print(f"Dry run — {len(pending)} file(s) pending transcription:")
-        for entry in pending:
-            print(f"  {entry.get('filename', '(unknown)')}")
+    if _maybe_print_dry_run(args, manifest):
         return
 
     print(f"Transcribing audio with backend '{config.transcribe.backend}'...")
