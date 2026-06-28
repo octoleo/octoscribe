@@ -727,3 +727,136 @@ class TestCombinedPriority:
         _minimal_env(monkeypatch)
         cfg = Config.load(ini_path=tmp_path / "none.ini")
         assert cfg.transcribe.workers == 4  # built-in default
+
+
+# ---------------------------------------------------------------------------
+# 16. Audio source selection (telegram | folder)
+# ---------------------------------------------------------------------------
+
+def _no_telegram_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Remove all Telegram/OpenAI secrets so folder mode can be tested clean."""
+    for key in ("TELEGRAM_API_ID", "TELEGRAM_API_HASH", "TELEGRAM_PHONE", "OPENAI_API_KEY"):
+        monkeypatch.delenv(key, raising=False)
+
+
+class TestSourceConfig:
+    def test_default_source_is_telegram(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When nothing is configured the source defaults to Telegram."""
+        _minimal_env(monkeypatch)
+        cfg = Config.load(ini_path=tmp_path / "none.ini")
+        assert cfg.source.mode == "telegram"
+        assert cfg.source.folder is None
+        assert cfg.source.recursive is True
+
+    def test_folder_mode_does_not_require_telegram_secrets(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Folder mode loads successfully with no Telegram credentials at all."""
+        _no_telegram_env(monkeypatch)
+        folder = tmp_path / "sermons"
+        folder.mkdir()
+        ini = _write_ini(
+            tmp_path,
+            f"""\
+            [source]
+            mode = folder
+            folder = {folder}
+
+            [transcribe]
+            backend = local
+            """,
+        )
+        cfg = Config.load(ini_path=ini, env_file=tmp_path / "none.env")
+
+        assert cfg.source.mode == "folder"
+        assert cfg.source.folder == folder.resolve()
+        assert cfg.telegram.api_id is None  # not required, not set
+
+    def test_folder_mode_requires_folder_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Folder mode without a folder path is a fatal configuration error."""
+        _no_telegram_env(monkeypatch)
+        ini = _write_ini(
+            tmp_path,
+            """\
+            [source]
+            mode = folder
+
+            [transcribe]
+            backend = local
+            """,
+        )
+        with pytest.raises(SystemExit):
+            Config.load(ini_path=ini, env_file=tmp_path / "none.env")
+
+    def test_folder_mode_missing_folder_message(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        _no_telegram_env(monkeypatch)
+        ini = _write_ini(
+            tmp_path, "[source]\nmode = folder\n\n[transcribe]\nbackend = local\n"
+        )
+        with pytest.raises(SystemExit):
+            Config.load(ini_path=ini, env_file=tmp_path / "none.env")
+        captured = capsys.readouterr()
+        assert "source.folder" in captured.err
+
+    def test_invalid_source_mode_exits(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unrecognised source.mode must cause a SystemExit."""
+        _minimal_env(monkeypatch)
+        ini = _write_ini(tmp_path, "[source]\nmode = ftp\n")
+        with pytest.raises(SystemExit):
+            Config.load(ini_path=ini)
+
+    def test_folder_path_resolved_absolute(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A relative source.folder is expanded and made absolute."""
+        _no_telegram_env(monkeypatch)
+        ini = _write_ini(
+            tmp_path,
+            "[source]\nmode = folder\nfolder = ~/sermons\n\n[transcribe]\nbackend = local\n",
+        )
+        cfg = Config.load(ini_path=ini, env_file=tmp_path / "none.env")
+        assert cfg.source.folder is not None
+        assert cfg.source.folder.is_absolute()
+        assert "~" not in str(cfg.source.folder)
+
+    def test_folder_mode_via_override(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Folder mode can be selected purely via CLI-style overrides."""
+        _no_telegram_env(monkeypatch)
+        folder = tmp_path / "sermons"
+        folder.mkdir()
+        cfg = Config.load(
+            ini_path=tmp_path / "none.ini",
+            env_file=tmp_path / "none.env",
+            source__mode="folder",
+            source__folder=str(folder),
+            transcribe__backend="local",
+        )
+        assert cfg.source.mode == "folder"
+        assert cfg.source.folder == folder.resolve()
+
+    def test_folder_mode_still_requires_openai_key_for_openai_backend(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Folder mode does not exempt the OpenAI key when backend=openai."""
+        _no_telegram_env(monkeypatch)
+        folder = tmp_path / "sermons"
+        folder.mkdir()
+        ini = _write_ini(
+            tmp_path,
+            f"[source]\nmode = folder\nfolder = {folder}\n\n[transcribe]\nbackend = openai\n",
+        )
+        with pytest.raises(SystemExit):
+            Config.load(ini_path=ini, env_file=tmp_path / "none.env")

@@ -1,6 +1,8 @@
 # OctoScribe
 
-OctoScribe is a Python 3.11+ CLI pipeline that monitors a Telegram group, downloads audio files (sermons, devotions, or any voice recordings) that it has not seen before, transcribes them verbatim using AI, and stores both the audio and the transcriptions in a dedicated, version-controlled data repository. Every run ends with an automatic git commit and push so your archive is always up to date.
+OctoScribe is a Python 3.11+ CLI pipeline that collects audio files (sermons, devotions, or any voice recordings) that it has not seen before, transcribes them verbatim using AI, and stores both the audio and the transcriptions in a dedicated, version-controlled data repository. Every run ends with an automatic git commit and push so your archive is always up to date.
+
+Audio can come from two sources: a **Telegram group** (the default) or a **local folder** of files you already have on disk. In folder mode no Telegram credentials are required — see [Audio sources](#audio-sources).
 
 ---
 
@@ -110,6 +112,44 @@ This will download any new audio files from the configured group, transcribe eac
 
 OctoScribe separates secrets from settings deliberately.
 
+### Audio sources
+
+OctoScribe can acquire audio from one of two sources, selected by the
+`[source] mode` setting in `conf/octoscribe.ini` (or `--source` on the command
+line):
+
+| Mode | Where audio comes from | Telegram credentials |
+| --- | --- | --- |
+| `telegram` (default) | New audio messages in a Telegram group | Required |
+| `folder` | Audio files in a local folder | Not required |
+
+**Folder mode** is the simplest way to process sermons you already have on
+disk. Configure it in the INI file:
+
+```ini
+[source]
+mode = folder
+folder = ~/sermons/incoming
+recursive = true
+```
+
+…or entirely from the command line (passing `--folder` implies
+`--source folder`):
+
+```bash
+python octoscribe.py download --folder ~/sermons/incoming
+python octoscribe.py run --folder ~/sermons/incoming --backend local
+```
+
+In folder mode the importer copies every recognised audio file (`.mp3`, `.wav`,
+`.flac`, `.m4a`, `.aac`, `.ogg`, `.oga`, `.opus`) into the data repository's
+audio directory and queues it for transcription. Files are deduplicated by
+SHA-256 content hash, so re-running over the same folder will not import the
+same recording twice. The original files in your source folder are never
+modified or moved. Because no Telegram connection is involved, none of the
+`TELEGRAM_*` variables are needed — only an `OPENAI_API_KEY` (when
+`transcribe.backend = openai`).
+
 ### `.env` — secrets only
 
 The `.env` file (copied from `conf/.env.example`) holds every credential:
@@ -162,15 +202,21 @@ python octoscribe.py run
 
 This is the command you will schedule in cron or run manually after a service.
 
-### `download` — Download only
+### `download` — Acquire audio only
 
-Fetch new audio files into the data repository without transcribing.
+Fetch new audio files into the data repository without transcribing. The source
+depends on `[source] mode` — a Telegram group by default, or a local folder:
 
 ```bash
+# From the configured Telegram group
 python octoscribe.py download
+
+# From a local folder (implies --source folder)
+python octoscribe.py download --folder ~/sermons/incoming
 ```
 
-Useful for bulk downloading when you want to transcribe later, or to test connectivity.
+Useful for bulk acquisition when you want to transcribe later, or to test
+connectivity.
 
 ### `transcribe` — Transcribe only
 
@@ -498,22 +544,26 @@ octoscribe/
 |
 |-- src/
 |   |-- config.py              Loads and validates .env + INI; exposes a typed Config object.
-|   |-- telegram_client.py     Telethon wrapper: connects, lists messages, downloads audio.
-|   |-- downloader.py          Orchestrates parallel audio downloads; checks manifest.
-|   |-- transcriber.py         Abstract base + OpenAI and Faster-Whisper implementations.
-|   |-- data_repo.py           Manages the data git repository: init, commit, push.
+|   |-- audio.py               Framework-agnostic audio helpers shared by the sources.
+|   |-- telegram.py            Telethon wrapper: connects, lists messages, downloads audio.
+|   |-- folder.py              Local folder importer: scans a folder, dedups, queues audio.
+|   |-- transcribe.py          Abstract base + OpenAI and Faster-Whisper implementations.
+|   |-- repository.py          Manages the data git repository: init, commit, push.
 |   |-- manifest.py            Reads and writes manifest.json; tracks processing state.
-|   |-- pipeline.py            Composes downloader + transcriber + data_repo into a run.
-|   |-- cli.py                 argparse definitions for all subcommands.
+|   |-- debug.py               Telegram connection / message metadata inspector.
 |
 |-- tests/
-|   |-- conftest.py            Shared fixtures: mock config, mock Telegram client, tmp repos.
-|   |-- test_config.py         Config loading, env override, missing-required-var errors.
-|   |-- test_downloader.py     Download logic, deduplication, resume, parallel workers.
-|   |-- test_transcriber.py    OpenAI and local backends, retry logic, error handling.
+|   |-- conftest.py            Shared fixtures: sample config, folder fixtures, tmp manifests.
+|   |-- test_config.py         Config loading, source selection, missing-required-var errors.
+|   |-- test_telegram.py       Telegram download logic, deduplication, resume, metadata.
+|   |-- test_folder.py         Folder import logic, deduplication, resume, error handling.
+|   |-- test_source_cmd.py     CLI source dispatch (download/status) and override mapping.
+|   |-- test_transcribe.py     OpenAI and local backends, retry logic, error handling.
 |   |-- test_manifest.py       Manifest read/write, state transitions, JSON integrity.
-|   |-- test_data_repo.py      Git init, commit, push, branch management.
-|   |-- test_pipeline.py       End-to-end pipeline integration tests with mocked I/O.
+|   |-- test_repository.py     Git init, commit, push, branch management.
+|   |-- test_session_cmd.py    `session` subcommand: export and check.
+|   |-- test_ci_export_cmd.py  `ci-export` subcommand and CI-environment guard.
+|   |-- test_debug.py          Debug inspector output.
 |
 |-- requirements.txt           All Python dependencies with minimum version pins.
 |-- .gitignore                 Excludes secrets, session files, data, and build artefacts.
