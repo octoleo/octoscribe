@@ -3,12 +3,19 @@
 octoscribe.py — CLI entry point for the OctoScribe pipeline.
 
 Usage:
-    octoscribe.py run              Full pipeline: sync→download→transcribe→sync
-    octoscribe.py download         Download new audio from Telegram only
+    octoscribe.py run              Full pipeline: sync→acquire→transcribe→sync
+    octoscribe.py download         Acquire new audio from the configured source
+                                   (Telegram group or local folder)
     octoscribe.py transcribe       Transcribe unprocessed audio only
     octoscribe.py sync             Sync data repository (pull or push)
     octoscribe.py status           Show pipeline status
     octoscribe.py debug            Inspect Telegram connection and audio metadata
+
+Audio source:
+    By default OctoScribe downloads audio from a Telegram group. To work with
+    sermons that already live in a local folder instead, set source.mode=folder
+    and source.folder in the INI file, or pass --folder PATH (which implies
+    --source folder). In folder mode no Telegram credentials are required.
 """
 
 from __future__ import annotations
@@ -72,6 +79,17 @@ def build_overrides(args: argparse.Namespace) -> dict:
     # Transcription backend override (transcribe / run)
     if getattr(args, "backend", None):
         overrides["transcribe__backend"] = args.backend
+
+    # Audio source overrides (download / run).
+    source = getattr(args, "source", None)
+    folder = getattr(args, "folder", None)
+    if source:
+        overrides["source__mode"] = source
+    if folder:
+        overrides["source__folder"] = folder
+        # Passing a folder is a convenient shorthand for selecting folder mode.
+        if not source:
+            overrides["source__mode"] = "folder"
 
     return overrides
 
@@ -140,6 +158,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override Telegram group (username, link, or numeric ID).",
     )
     run_parser.add_argument(
+        "--source",
+        choices=["telegram", "folder"],
+        help="Audio source: 'telegram' (default) or 'folder'.",
+    )
+    run_parser.add_argument(
+        "--folder",
+        metavar="PATH",
+        help="Local folder to import audio from (implies --source folder).",
+    )
+    run_parser.add_argument(
         "--backend",
         metavar="BACKEND",
         choices=["openai", "local"],
@@ -161,12 +189,22 @@ def build_parser() -> argparse.ArgumentParser:
     # ---- download ------------------------------------------------------
     dl_parser = subparsers.add_parser(
         "download",
-        help="Download new audio from Telegram only.",
+        help="Acquire new audio from the configured source (Telegram or folder).",
     )
     dl_parser.add_argument(
         "--group",
         metavar="GROUP",
         help="Override Telegram group.",
+    )
+    dl_parser.add_argument(
+        "--source",
+        choices=["telegram", "folder"],
+        help="Audio source: 'telegram' (default) or 'folder'.",
+    )
+    dl_parser.add_argument(
+        "--folder",
+        metavar="PATH",
+        help="Local folder to import audio from (implies --source folder).",
     )
 
     # ---- transcribe ----------------------------------------------------
@@ -257,6 +295,38 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 # ---------------------------------------------------------------------------
+# Source acquisition
+# ---------------------------------------------------------------------------
+
+def acquire_audio(config, manifest):
+    """
+    Acquire new audio from the configured source.
+
+    Dispatches on ``config.source.mode``:
+      - ``"folder"``  — import audio from a local folder (no Telegram needed).
+      - ``"telegram"`` — download audio from a Telegram group.
+
+    Prints a one-line status describing the source and returns a stats object
+    exposing a ``.summary()`` method.
+    """
+    if config.source.mode == "folder":
+        from src.folder import FolderImporter
+
+        print(f"Importing audio from folder: {config.source.folder}")
+        return FolderImporter(config, manifest).run()
+
+    from src.telegram import TelegramDownloader
+
+    print("Downloading audio from Telegram...")
+
+    async def _download():
+        async with TelegramDownloader(config, manifest) as dl:
+            return await dl.run()
+
+    return async_run(_download())
+
+
+# ---------------------------------------------------------------------------
 # Command implementations
 # ---------------------------------------------------------------------------
 
@@ -264,7 +334,6 @@ def cmd_run(args: argparse.Namespace, config) -> None:
     """Full pipeline: sync → download → transcribe → commit/push."""
     from src.manifest import Manifest
     from src.repository import DataRepository, DataRepoError
-    from src.telegram import TelegramDownloader
     from src.transcribe import Transcriber
 
     # 1. Prepare the data repository (clone or pull).
@@ -278,7 +347,7 @@ def cmd_run(args: argparse.Namespace, config) -> None:
     # 2. Set up manifest.
     manifest = Manifest(config.download.manifest_file)
 
-    # 3. Download.
+    # 3. Acquire audio from the configured source.
     if getattr(args, "dry_run", False):
         pending = manifest.pending_transcription()
         print(f"Dry run — {len(pending)} file(s) pending transcription:")
@@ -286,16 +355,12 @@ def cmd_run(args: argparse.Namespace, config) -> None:
             print(f"  {entry.get('filename', '(unknown)')}")
         return
 
-    print("Downloading audio from Telegram...")
     try:
-        async def _download():
-            async with TelegramDownloader(config, manifest) as dl:
-                return await dl.run()
-        dl_stats = async_run(_download())
-        print(dl_stats.summary())
+        src_stats = acquire_audio(config, manifest)
+        print(src_stats.summary())
     except Exception as exc:
-        print(f"ERROR: Download failed: {exc}", file=sys.stderr)
-        log.debug("Download error detail", exc_info=True)
+        print(f"ERROR: Audio acquisition failed: {exc}", file=sys.stderr)
+        log.debug("Acquisition error detail", exc_info=True)
         sys.exit(1)
 
     # 4. Transcribe.
@@ -327,22 +392,17 @@ def cmd_run(args: argparse.Namespace, config) -> None:
 
 
 def cmd_download(args: argparse.Namespace, config) -> None:
-    """Download new audio from Telegram only."""
+    """Acquire new audio from the configured source (Telegram or folder)."""
     from src.manifest import Manifest
-    from src.telegram import TelegramDownloader
 
     manifest = Manifest(config.download.manifest_file)
 
-    print("Downloading audio from Telegram...")
     try:
-        async def _download():
-            async with TelegramDownloader(config, manifest) as dl:
-                return await dl.run()
-        stats = async_run(_download())
+        stats = acquire_audio(config, manifest)
         print(stats.summary())
     except Exception as exc:
-        print(f"ERROR: Download failed: {exc}", file=sys.stderr)
-        log.debug("Download error detail", exc_info=True)
+        print(f"ERROR: Audio acquisition failed: {exc}", file=sys.stderr)
+        log.debug("Acquisition error detail", exc_info=True)
         sys.exit(1)
 
 
@@ -439,8 +499,14 @@ def cmd_status(args: argparse.Namespace, config) -> None:
     backend_display = config.transcribe.backend
     model_display = config.transcribe.model
 
+    if config.source.mode == "folder":
+        source_display = f"folder ({config.source.folder})"
+    else:
+        source_display = f"telegram ({config.telegram.group or '(no group set)'})"
+
     print("OctoScribe Status")
     print("=================")
+    print(f"Source:        {source_display}")
     print(f"Data repo:     {repo_status.get('path', config.data_repo.path)} (branch: {branch_display})")
     print(f"Remote:        {remote_display}")
     print(f"Uncommitted:   {uncommitted_display}")
@@ -496,6 +562,8 @@ def cmd_ci_export(args: argparse.Namespace, config) -> None:
 
     # --- Variables (store as repository Variables, not Secrets) --------
     variables = {
+        "SOURCE_MODE":         config.source.mode,
+        "SOURCE_FOLDER":       str(config.source.folder) if config.source.folder else "(not set)",
         "TELEGRAM_GROUP":      config.telegram.group or "(not set)",
         "TRANSCRIBE_BACKEND":  config.transcribe.backend,
         "TRANSCRIBE_MODEL":    config.transcribe.model,

@@ -18,7 +18,33 @@
 
 
 # -----------------------------------------------------------------------------
-# [telegram] — Which group to monitor
+# [source] — Where sermon audio comes from
+# -----------------------------------------------------------------------------
+[source]
+
+# Audio source mode.
+# telegram — Download audio from the Telegram group configured below.
+#            Requires the Telegram credentials in .env (see conf/.env.example).
+# folder   — Import audio from a local folder (see "folder" below). No Telegram
+#            credentials are required in this mode.
+# Default: telegram
+mode = telegram
+
+# Local folder to import sermons from. Only used when mode = folder.
+# All recognised audio files (.mp3, .wav, .flac, .m4a, .aac, .ogg, .oga, .opus)
+# found here are copied into the data repository and queued for transcription.
+# The ~ shortcut expands to the current user's home directory.
+# Example: folder = ~/sermons/incoming
+folder =
+
+# When mode = folder, also scan sub-folders for audio (true) or only the top
+# level of "folder" (false).
+# Default: true
+recursive = true
+
+
+# -----------------------------------------------------------------------------
+# [telegram] — Which group to monitor (used when source.mode = telegram)
 # -----------------------------------------------------------------------------
 [telegram]
 

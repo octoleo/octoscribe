@@ -18,6 +18,7 @@ from src.config import (
     Config,
     DataRepoConfig,
     DownloadConfig,
+    SourceConfig,
     TelegramConfig,
     TranscribeConfig,
 )
@@ -99,13 +100,46 @@ def sample_config(tmp_data_dir: Path) -> Config:
         auto_push=False,
     )
 
+    source = SourceConfig(mode="telegram", folder=None, recursive=True)
+
     return Config(
         telegram=telegram,
         download=download,
         transcribe=transcribe,
         data_repo=data_repo,
         ini_path=tmp_data_dir / "octoscribe.ini",
+        source=source,
     )
+
+
+# ---------------------------------------------------------------------------
+# Folder-source fixtures
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def sample_audio_folder(tmp_path: Path) -> Path:
+    """
+    A temporary folder of incoming sermons.
+
+    Contains two audio files (one nested) plus a non-audio file that must be
+    ignored by the importer.
+    """
+    folder = tmp_path / "incoming_sermons"
+    (folder / "nested").mkdir(parents=True)
+    (folder / "Sermon One.mp3").write_bytes(b"sermon one audio bytes")
+    (folder / "notes.txt").write_bytes(b"not audio, must be ignored")
+    (folder / "nested" / "Deep Truth.flac").write_bytes(b"nested sermon audio")
+    return folder
+
+
+@pytest.fixture
+def folder_config(sample_config: Config, sample_audio_folder: Path) -> Config:
+    """A Config configured to import from a local folder rather than Telegram."""
+    sample_config.source = SourceConfig(
+        mode="folder", folder=sample_audio_folder, recursive=True
+    )
+    return sample_config
 
 
 # ---------------------------------------------------------------------------

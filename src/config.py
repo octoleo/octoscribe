@@ -36,6 +36,11 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _DEFAULT_INI: str = """\
+[source]
+mode = telegram
+folder =
+recursive = true
+
 [telegram]
 group =
 
@@ -81,10 +86,19 @@ session_dir = .session
 # ---------------------------------------------------------------------------
 
 @dataclass
+class SourceConfig:
+    """Audio source selection: a Telegram group or a local folder."""
+
+    mode: str                 # "telegram" | "folder"
+    folder: Optional[Path]    # local folder to import from when mode == "folder"
+    recursive: bool           # scan the folder recursively for audio files
+
+
+@dataclass
 class TelegramConfig:
     """Telegram client credentials and target group."""
 
-    api_id: int
+    api_id: Optional[int]   # required in telegram mode; may be None in folder mode
     api_hash: str
     phone: str
     group: str          # INI [telegram] group
@@ -157,6 +171,11 @@ class Config:
     transcribe: TranscribeConfig
     data_repo: DataRepoConfig
     ini_path: Path
+    # Defaulted so existing call sites that predate the source feature keep
+    # working; Config.load() always sets this explicitly.
+    source: SourceConfig = field(
+        default_factory=lambda: SourceConfig(mode="telegram", folder=None, recursive=True)
+    )
 
     # ------------------------------------------------------------------
     # Public factory
@@ -218,6 +237,7 @@ class Config:
                 lines.append(f"    {f.name}={display},")
             lines.append("  ),")
 
+        _fmt_sub("source", self.source)
         _fmt_sub("telegram", self.telegram)
         _fmt_sub("download", self.download)
         _fmt_sub("transcribe", self.transcribe)
@@ -263,13 +283,18 @@ class _ConfigLoader:
         # Step 4 – build each sub-config.
         # data_repo must be built first because other builders need data_repo.path
         # as the base for resolving relative paths (including session_dir).
+        # source must be built before telegram so we know whether Telegram
+        # credentials are required (they are not in folder mode).
         data_repo = self._build_data_repo(ini)
-        telegram = self._build_telegram(ini, data_repo.path)
+        source = self._build_source(ini)
+        telegram = self._build_telegram(
+            ini, data_repo.path, require_secrets=(source.mode == "telegram")
+        )
         download = self._build_download(ini, data_repo.path)
         transcribe = self._build_transcribe(ini, data_repo.path)
 
         # Step 5 – validate.
-        self._validate(telegram, transcribe, data_repo)
+        self._validate(source, telegram, transcribe, data_repo)
 
         return Config(
             telegram=telegram,
@@ -277,6 +302,7 @@ class _ConfigLoader:
             transcribe=transcribe,
             data_repo=data_repo,
             ini_path=resolved_ini_path,
+            source=source,
         )
 
     # ------------------------------------------------------------------
@@ -364,16 +390,38 @@ class _ConfigLoader:
     # Sub-config builders
     # ------------------------------------------------------------------
 
+    def _build_source(self, ini: configparser.ConfigParser) -> SourceConfig:
+        mode = str(
+            self._override("source", "mode", ini.get("source", "mode", fallback="telegram"))
+        ).strip().lower()
+        recursive = _parse_bool(
+            self._override(
+                "source", "recursive", ini.get("source", "recursive", fallback="true")
+            )
+        )
+        folder_raw = self._override(
+            "source", "folder", ini.get("source", "folder", fallback="")
+        )
+        folder: Optional[Path] = None
+        if folder_raw and str(folder_raw).strip():
+            folder = Path(str(folder_raw).strip()).expanduser().resolve()
+
+        return SourceConfig(mode=mode, folder=folder, recursive=recursive)
+
     def _build_telegram(
-        self, ini: configparser.ConfigParser, data_root: Path
+        self, ini: configparser.ConfigParser, data_root: Path, require_secrets: bool = True
     ) -> TelegramConfig:
         # --- secrets from env only ---
         api_id_raw = self._override("telegram", "api_id", os.environ.get("TELEGRAM_API_ID", ""))
         api_hash = self._override("telegram", "api_hash", os.environ.get("TELEGRAM_API_HASH", ""))
         phone = self._override("telegram", "phone", os.environ.get("TELEGRAM_PHONE", ""))
 
-        # Validate api_id early so we get a clear error.
-        api_id = _require_int(api_id_raw, "TELEGRAM_API_ID")
+        # Validate api_id early so we get a clear error — but only when Telegram
+        # is the active source.  In folder mode the credentials are optional.
+        if require_secrets:
+            api_id = _require_int(api_id_raw, "TELEGRAM_API_ID")
+        else:
+            api_id = _optional_int(api_id_raw, "TELEGRAM_API_ID")
 
         # --- non-secret settings from INI ---
         group = self._override("telegram", "group", ini.get("telegram", "group", fallback=""))
@@ -573,23 +621,46 @@ class _ConfigLoader:
 
     @staticmethod
     def _validate(
+        source: SourceConfig,
         telegram: TelegramConfig,
         transcribe: TranscribeConfig,
         data_repo: DataRepoConfig,
     ) -> None:
         errors: list[str] = []
 
-        # Required Telegram secrets
-        if not telegram.api_hash:
+        # Source mode validation
+        valid_modes = {"telegram", "folder"}
+        if source.mode not in valid_modes:
             errors.append(
-                "TELEGRAM_API_HASH is required but not set. "
-                "Export it as an environment variable or add it to your .env file."
+                f"source.mode must be one of {sorted(valid_modes)!r}, "
+                f"got {source.mode!r}."
             )
-        if not telegram.phone:
-            errors.append(
-                "TELEGRAM_PHONE is required but not set. "
-                "Export it as an environment variable or add it to your .env file."
-            )
+
+        if source.mode == "folder":
+            # Folder mode only needs a folder path — no Telegram credentials.
+            if source.folder is None:
+                errors.append(
+                    "source.folder is required when source.mode='folder'. "
+                    "Set it in the [source] section of your INI file or pass "
+                    "--folder PATH on the command line."
+                )
+        elif source.mode == "telegram":
+            # Required Telegram secrets (only when Telegram is the active source).
+            if not telegram.api_id:
+                errors.append(
+                    "TELEGRAM_API_ID is required but not set. "
+                    "Export it as an environment variable or add it to your .env file."
+                )
+            if not telegram.api_hash:
+                errors.append(
+                    "TELEGRAM_API_HASH is required but not set. "
+                    "Export it as an environment variable or add it to your .env file."
+                )
+            if not telegram.phone:
+                errors.append(
+                    "TELEGRAM_PHONE is required but not set. "
+                    "Export it as an environment variable or add it to your .env file."
+                )
 
         # Backend validation
         valid_backends = {"openai", "local"}
@@ -641,6 +712,23 @@ def _require_int(value: Any, name: str) -> int:
             f"{name} must be a valid integer, got {value!r}. "
             "Check your environment variable or .env file."
         ])
+
+
+def _optional_int(value: Any, name: str) -> Optional[int]:
+    """
+    Parse *value* as an integer when present.
+
+    Returns ``None`` when *value* is empty/unset.  A present-but-invalid value
+    is logged and treated as unset rather than fatal, because the caller has
+    indicated the field is not required in the current mode.
+    """
+    if value == "" or value is None:
+        return None
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        log.warning("%s is set but is not a valid integer (%r); ignoring.", name, value)
+        return None
 
 
 def _parse_bool(value: Any) -> bool:
