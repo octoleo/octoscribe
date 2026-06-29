@@ -4,19 +4,34 @@ OctoScribe is a Python 3.11+ CLI pipeline that collects audio files (sermons, de
 
 Audio can come from two sources: a **Telegram group** (the default) or a **local folder** of files you already have on disk. In folder mode no Telegram credentials are required — see [Audio sources](#audio-sources).
 
+This README is a **getting-started guide** — everything you need to install, configure and run OctoScribe. If you want to understand *how it works internally* or *contribute to the code*, see the [Documentation](#documentation) section below.
+
 ---
 
 ## Table of Contents
 
-1. [Prerequisites](#prerequisites)
-2. [Quick Start](#quick-start)
-3. [Configuration](#configuration)
-4. [Commands Reference](#commands-reference)
-5. [Data Repository](#data-repository)
-6. [Transcription Backends](#transcription-backends)
-7. [GitHub Actions Workflow](#github-actions-workflow)
-8. [Testing](#testing)
-9. [Project Structure](#project-structure)
+1. [Documentation](#documentation)
+2. [Prerequisites](#prerequisites)
+3. [Quick Start](#quick-start)
+4. [Configuration](#configuration)
+5. [Commands Reference](#commands-reference)
+6. [Data Repository](#data-repository)
+7. [Transcription Backends](#transcription-backends)
+8. [GitHub Actions Workflow](#github-actions-workflow)
+9. [Testing](#testing)
+10. [Project Structure](#project-structure)
+
+---
+
+## Documentation
+
+| Document | What it is for |
+| --- | --- |
+| **README** (this file) | How to **install, configure and run** OctoScribe. Start here. |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | How OctoScribe **works under the hood** — the full execution path from command to commit, which classes and functions run at each stage, the different ways it can run, and the reasoning behind the design. Read this before changing the code. |
+| [`docs/TESTING.md`](docs/TESTING.md) | How the **test suite** is structured and run, and how to add to it. |
+
+New documentation belongs in the [`docs/`](docs/) folder; link to it from this table so it stays easy to find.
 
 ---
 
@@ -194,13 +209,24 @@ python octoscribe.py <command> [options]
 
 ### `run` — Full pipeline
 
-Download new audio, transcribe it, commit and push the data repository.
+Download (or import) new audio, transcribe it, then commit and push the data repository.
 
 ```bash
 python octoscribe.py run
 ```
 
 This is the command you will schedule in cron or run manually after a service.
+
+Useful options:
+
+| Option | Effect |
+| --- | --- |
+| `--source telegram\|folder` | Force the audio source for this run. |
+| `--folder PATH` | Import from a local folder (implies `--source folder`). |
+| `--group GROUP` | Override the Telegram group (`@username` or numeric chat ID). |
+| `--backend openai\|local` | Override the transcription backend. |
+| `--dry-run` | List the files pending transcription and exit — no downloads, no API calls, no commits. |
+| `--no-push` | Run everything but skip the final `git push` (changes are still committed locally). |
 
 ### `download` — Acquire audio only
 
@@ -224,37 +250,50 @@ Transcribe audio files that are in the data repository but do not yet have a tra
 
 ```bash
 python octoscribe.py transcribe
+
+# Preview what would be transcribed, without calling any backend
+python octoscribe.py transcribe --dry-run
+
+# Re-transcribe with a different backend
+python octoscribe.py transcribe --backend local
 ```
 
 Useful after switching backends (e.g. re-transcribing existing audio with a better model).
 
 ### `sync` — Commit and push data repository
 
-Commit any uncommitted changes in the data repository and push to the remote.
+Pull the latest data repository state, then commit any changes and push to the remote.
 
 ```bash
 python octoscribe.py sync
+
+# Pull only (don't commit or push)
+python octoscribe.py sync --pull-only
+
+# Commit and push only (don't pull first)
+python octoscribe.py sync --push-only
 ```
 
 ### `status` — Pipeline status
 
-Print a summary of the data repository state: total files, transcribed, pending, last run timestamp, and remote sync status.
+Print a read-only summary: the active audio source, the data repository path/branch/remote, whether there are uncommitted changes, and manifest counts (total, downloaded, transcribed, failed, pending transcription).
 
 ```bash
 python octoscribe.py status
 ```
 
-Also triggers Telegram authentication if no session file exists yet, making it a safe first command to run.
+### `debug` — Telegram diagnostics
 
-### `debug` — Diagnostic information
-
-Print detailed diagnostics: resolved config values (with secrets redacted), Telegram connection details, group membership, recent messages, and data repository git log.
+Connect to Telegram and print full metadata for the first few audio messages in the configured group (message id, MIME type, attributes, and the values OctoScribe extracts from them).
 
 ```bash
 python octoscribe.py debug
+
+# Inspect more messages (default is 3)
+python octoscribe.py debug --scan-limit 10
 ```
 
-Use this to find a group's numeric chat ID or to troubleshoot connection issues.
+Use this to find a private group's numeric chat ID or to troubleshoot why a message is or isn't detected as audio.
 
 ### `session` — Manage Telegram session files
 
@@ -273,6 +312,14 @@ python octoscribe.py session export
 ```
 
 Prints the base64-encoded session file to stdout. Use the output to populate the `TELEGRAM_SESSION_B64` GitHub Secret so GitHub Actions can authenticate without interactive prompts.
+
+### `ci-export` — Print all CI/CD secrets and variables
+
+```bash
+python octoscribe.py ci-export
+```
+
+Prints every secret and variable you need to configure a CI/CD pipeline (including the base64 session), formatted for copying into your repository's Secrets and Variables. **Local use only** — it refuses to run inside a CI environment so secrets never end up in build logs.
 
 ---
 
@@ -305,7 +352,7 @@ In your repository go to **Settings → Secrets and variables → Actions → Ne
 
 **Step 4 — Done**
 
-On every workflow run `_restore_session_from_env()` decodes the secret and writes the session file before any Telegram requests are made. No interactive authentication is needed.
+On every workflow run, OctoScribe decodes this secret back into a `.session` file before any Telegram requests are made, so Telethon starts already authenticated. (See [the architecture doc](docs/ARCHITECTURE.md#how-non-interactive-auth-works-in-ci) for exactly when and where this happens.) No interactive authentication is needed.
 
 > **Important:** If you ever regenerate your Telegram session (e.g. after logging out or revoking API access), repeat Steps 1–3 to update the secret.
 
@@ -501,94 +548,42 @@ Skipping or reordering any of these will cause the pipeline to fail (no SSH key 
 
 ## Testing
 
-OctoScribe uses [pytest](https://pytest.org) with asyncio and mock support.
-
-### Run the full test suite
+OctoScribe uses [pytest](https://pytest.org) with asyncio and mock support. The whole suite is hermetic — it mocks Telethon, OpenAI and Faster-Whisper, so it needs no network, credentials or GPU and runs in well under a second.
 
 ```bash
+# Run the full suite
 pytest
-```
 
-### Run with coverage
-
-```bash
+# With coverage
 pytest --cov=src --cov-report=html
 open htmlcov/index.html
+
+# A single file, or a single test
+pytest tests/test_transcribe.py
+pytest tests/test_transcribe.py::test_openai_backend_retries_on_rate_limit
 ```
 
-### Run a specific test file or test
-
-```bash
-pytest tests/test_downloader.py
-pytest tests/test_transcriber.py::test_openai_retry_on_rate_limit
-```
-
-### Run only fast tests (skip slow integration tests)
-
-```bash
-pytest -m "not slow"
-```
+For the full picture — what each test file covers, the shared fixtures, and how each external service is mocked — see **[`docs/TESTING.md`](docs/TESTING.md)**.
 
 ---
 
 ## Project Structure
 
-For the design rationale behind this layout — how the SOLID principles, the
-Strategy pattern, and the transcription stability guarantees are applied — see
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+At a glance:
 
 ```
 octoscribe/
-|
-|-- octoscribe.py              Entry point. Parses subcommands and wires the pipeline.
-|
-|-- conf/
-|   |-- .env.example           Template for secrets (.env). Copy to project root.
-|   |-- octoscribe.ini.example Template for runtime config. Copy to conf/octoscribe.ini.
-|
-|-- src/
-|   |-- config/               Configuration package (split by responsibility):
-|   |   |-- models.py            Typed, logic-free config value objects.
-|   |   |-- helpers.py           Pure parsing/validation helpers (_parse_bool, ...).
-|   |   |-- loader.py            Multi-source loader: precedence + validation.
-|   |   |-- root.py              The aggregate Config object and its load() factory.
-|   |-- transcribe/           Transcription package (split by responsibility):
-|   |   |-- prompt.py            The verbatim instruction string.
-|   |   |-- normalize.py         Whitespace-only, word-preserving normalisation.
-|   |   |-- results.py           TranscriptionResult / BatchStats value objects.
-|   |   |-- transcriber.py       Batch orchestrator + backend factory.
-|   |   |-- backends/            Strategy interface + implementations:
-|   |   |   |-- base.py            The TranscriptionBackend interface.
-|   |   |   |-- retry.py           Reusable RetryPolicy + ErrorClassifier.
-|   |   |   |-- openai_backend.py  OpenAI gpt-4o-transcribe backend.
-|   |   |   |-- local_whisper.py   Local Faster-Whisper backend.
-|   |-- audio.py               Framework-agnostic audio helpers shared by the sources.
-|   |-- persistence.py         Shared atomic writes + periodic-save helper.
-|   |-- telegram_client.py     Shared Telegram session + entity helpers.
-|   |-- telegram.py            Telethon wrapper: connects, lists messages, downloads audio.
-|   |-- folder.py              Local folder importer: scans a folder, dedups, queues audio.
-|   |-- repository.py          Manages the data git repository: init, commit, push.
-|   |-- manifest.py            Reads and writes manifest.json; tracks processing state.
-|   |-- debug.py               Telegram connection / message metadata inspector.
-|
-|-- tests/
-|   |-- conftest.py            Shared fixtures: sample config, folder fixtures, tmp manifests.
-|   |-- test_config.py         Config loading, source selection, missing-required-var errors.
-|   |-- test_telegram.py       Telegram download logic, deduplication, resume, metadata.
-|   |-- test_folder.py         Folder import logic, deduplication, resume, error handling.
-|   |-- test_source_cmd.py     CLI source dispatch (download/status) and override mapping.
-|   |-- test_transcribe.py     OpenAI and local backends, retry logic, error handling.
-|   |-- test_manifest.py       Manifest read/write, state transitions, JSON integrity.
-|   |-- test_repository.py     Git init, commit, push, branch management.
-|   |-- test_session_cmd.py    `session` subcommand: export and check.
-|   |-- test_ci_export_cmd.py  `ci-export` subcommand and CI-environment guard.
-|   |-- test_debug.py          Debug inspector output.
-|
-|-- requirements.txt           All Python dependencies with minimum version pins.
-|-- .gitignore                 Excludes secrets, session files, data, and build artefacts.
-|-- LICENSE                    The LICENSE of this project.
-|-- README.md                  This file.
+|-- octoscribe.py     CLI entry point: parses subcommands and wires the pipeline.
+|-- conf/             .env.example and octoscribe.ini.example templates.
+|-- src/              All the implementation: config, audio sources, transcription,
+|                     the manifest, and the data-repository git wrapper.
+|-- tests/            The pytest suite (everything external is mocked).
+|-- docs/             ARCHITECTURE.md and TESTING.md.
+|-- action.yml        Composite GitHub Action wrapper.
+|-- requirements.txt  Python dependencies with minimum version pins.
 ```
+
+For a full, annotated module map — every file in `src/`, what it is responsible for, and how the pieces depend on each other — see the [**Module map** in `docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#module-map--what-lives-where).
 
 ---
 
