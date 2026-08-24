@@ -2,17 +2,14 @@
 # OctoScribe — Configuration File Template
 # =============================================================================
 #
-# Copy this file to conf/octoscribe.ini and adjust the settings for your setup:
+# Copy this file to conf/octoscribe.ini and adjust non-secret settings:
 #
 #   cp conf/octoscribe.ini.example conf/octoscribe.ini
 #
-# IMPORTANT — SECRETS DO NOT BELONG HERE.
-# This file is for non-secret runtime settings only. API keys, tokens, phone
-# numbers, and any other credentials must be stored in .env (see conf/.env.example).
-# The actual conf/octoscribe.ini is listed in .gitignore so it cannot be
-# accidentally committed, but please be careful regardless.
+# Keep API keys, tokens, phone numbers, and repository URLs in .env or the CI
+# secret store. Never place secrets or Telegram sessions in an evidence repo.
 #
-# To use a non-default path for this file, set OCTOSCRIBE_CONFIG before running:
+# To use a non-default configuration file:
 #   OCTOSCRIBE_CONFIG=/path/to/custom.ini python octoscribe.py run
 # =============================================================================
 
@@ -22,212 +19,171 @@
 # -----------------------------------------------------------------------------
 [source]
 
-# Audio source mode.
-# telegram — Download audio from the Telegram group configured below.
-#            Requires the Telegram credentials in .env (see conf/.env.example).
-# folder   — Import audio from a local folder (see "folder" below). No Telegram
-#            credentials are required in this mode.
-# Default: telegram
+# telegram: download from [telegram]. Requires Telegram credentials.
+# folder: import existing audio from folder below; Telegram is not required.
 mode = telegram
 
-# Local folder to import sermons from. Only used when mode = folder.
-# All recognised audio files (.mp3, .wav, .flac, .m4a, .aac, .ogg, .oga, .opus)
-# found here are copied into the data repository and queued for transcription.
-# The ~ shortcut expands to the current user's home directory.
+# Used only in folder mode. Recognised audio files are copied into the audio
+# repository and then enter the same manifest, transcription, and logging path.
 # Example: folder = ~/sermons/incoming
 folder =
-
-# When mode = folder, also scan sub-folders for audio (true) or only the top
-# level of "folder" (false).
-# Default: true
 recursive = true
 
 
 # -----------------------------------------------------------------------------
-# [telegram] — Which group to monitor (used when source.mode = telegram)
+# [telegram] — Group monitored in Telegram mode
 # -----------------------------------------------------------------------------
 [telegram]
 
-# The Telegram group or channel to download audio from.
-# Accepted formats:
-#   @username          e.g. @my_church_sermons
-#   Numeric chat ID    e.g. -1001234567890  (useful for private groups)
-# To find a private group's chat ID, run:  python octoscribe.py debug
+# @username, t.me link, or numeric chat ID such as -1001234567890.
 group = @your_group_or_chat_id
 
 
 # -----------------------------------------------------------------------------
-# [download] — Audio download behaviour
+# [download] — Audio acquisition
 # -----------------------------------------------------------------------------
 [download]
 
-# Number of parallel download workers. Increase on fast connections; decrease
-# if you hit Telegram rate limits (FloodWaitError).
-# Range: 1–16  |  Default: 4
 workers = 4
-
-# Resume interrupted downloads. When true, partially downloaded files are
-# kept and the download picks up where it left off. When false, incomplete
-# files are deleted and restarted.
-# Default: true
 resume = true
-
-# Skip files that are already recorded in manifest.json (by Telegram message
-# ID). Setting this to false will re-download and re-transcribe everything,
-# which is expensive and rarely needed.
-# Default: true
 deduplicate = true
 
 
 # -----------------------------------------------------------------------------
-# [transcribe] — Transcription pipeline settings
+# [transcribe] — Provider selection and request policy
 # -----------------------------------------------------------------------------
 [transcribe]
 
-# Transcription backend to use.
-# openai — Uses the OpenAI gpt-4o-transcribe model via the API. Requires
-#           OPENAI_API_KEY in your .env. Higher accuracy, costs money per
-#           minute of audio, no GPU needed.
-# local  — Uses Faster-Whisper running locally. Requires a CUDA-capable GPU
-#           for good throughput (CPU mode is very slow). Free after hardware.
-# Default: openai
-backend = openai
+# By default, OctoScribe discovers providers from configured environment
+# credentials in this order: openai, xai, meta. OpenAI is therefore primary
+# whenever OPENAI_API_KEY exists. With one provider it transcribes once; two
+# cross-check one another; a third is a bounded fallback checker or arbiter.
+#
+# Uncomment to choose the exact provider set (order is significant; max three):
+# providers = openai,xai,meta
+# primary_provider = openai
+#
+# Legacy single-provider configurations remain supported. Do not set backend
+# together with providers; an explicit providers list is the new interface.
+# backend = openai
 
-# Model name passed to the active backend.
-# For openai backend:  gpt-4o-transcribe  (recommended)
-#                      whisper-1          (legacy, lower quality)
-# For local backend:   this setting is ignored; use [local_transcribe] model.
-model = gpt-4o-transcribe
-
-# BCP-47 language code for the primary language spoken in the audio.
-# Providing the correct language improves accuracy and speed.
-# Examples: en, af, fr, de, es, pt, zu, xh
-# Default: en
+# OpenAI model. Other providers use their own configured model identifiers.
+model = gpt-transcribe
 language = en
 
-# Number of parallel transcription workers. For the openai backend this is
-# the number of concurrent API requests; respect your OpenAI tier rate limits.
-# For the local backend this should match the number of GPUs (usually 1).
-# Range: 1–8  |  Default: 4
+# Parallel provider/API work and transport failure retries.
 workers = 4
-
-# Number of times to retry a failed transcription before marking it as failed.
-# Retries use exponential back-off between retry_base_delay and retry_max_delay.
-# Default: 3
-retry_attempts = 3
-
-# Base delay in seconds for the first retry. Subsequent retries double this
-# value up to retry_max_delay.
-# Default: 2.5
+retry_attempts = 1
 retry_base_delay = 2.5
-
-# Maximum delay in seconds between retries.
-# Default: 30.0
 retry_max_delay = 30.0
+provider_timeout_seconds = 900
 
 
 # -----------------------------------------------------------------------------
-# [local_transcribe] — Faster-Whisper specific settings
+# [chunking] — Deterministic long-audio preparation
 # -----------------------------------------------------------------------------
-# These settings are only used when transcribe.backend = local.
+# ffmpeg/ffprobe are required. Chunks are hashed so every provider can be shown
+# to have received identical audio bytes. Values below keep OpenAI WAV uploads
+# under its request-size limit while retaining overlap around boundaries.
+[chunking]
+
+target_seconds = 480
+max_seconds = 600
+overlap_seconds = 12
+silence_search_seconds = 45
+silence_threshold_db = -35
+silence_min_ms = 500
+max_chunk_megabytes = 24
+
+
+# -----------------------------------------------------------------------------
+# [quality] — Hard bounds on discrepancy resolution
+# -----------------------------------------------------------------------------
+# Each limit may be 0 or 1. The pipeline never enters an unbounded correction
+# loop and never silently rewrites a sermon from a naive word majority.
+[quality]
+
+disagreement_retry_limit = 1
+arbitration_limit = 1
+
+
+# -----------------------------------------------------------------------------
+# Provider endpoints (credentials stay in .env)
+# -----------------------------------------------------------------------------
+[xai]
+
+base_url = https://api.x.ai/v1/stt
+
+[meta_asr]
+
+# Base URL, /v1 URL, or complete /v1/audio/transcriptions URL for an explicitly
+# hosted OpenAI-compatible Meta speech-recognition service. Leaving this blank
+# disables Meta auto-discovery. A normal text-only Llama/Ollama endpoint cannot
+# transcribe audio and must not be configured here.
+url =
+model = omniASR_LLM_Unlimited_7B_v2
+language = eng_Latn
+
+
+# -----------------------------------------------------------------------------
+# [local_transcribe] — Local Faster-Whisper provider settings
+# -----------------------------------------------------------------------------
+# To use it explicitly, set providers = whisper above (or include whisper in a
+# multi-provider list). CPU mode is substantially slower than a CUDA GPU.
 [local_transcribe]
 
-# Whisper model size to load. Larger models are more accurate but slower and
-# require more VRAM.
-# Options: tiny, base, small, medium, large-v2, large-v3, large-v3-turbo
-# Default: large-v3
 model = large-v3
-
-# Device to run inference on.
-# cuda — NVIDIA GPU (recommended, ~10-20x faster than CPU)
-# cpu  — CPU only (very slow for large-v3; consider small or medium)
-# Default: cuda
 device = cuda
-
-# Quantisation / compute type. Trade-off between speed, VRAM usage, and
-# accuracy. Best choices per device:
-#   NVIDIA Ampere+ (RTX 30xx/40xx, A100): float16 or int8_float16
-#   Older NVIDIA GPUs:                    int8_float16 or int8
-#   CPU:                                  int8
-# Default: int8_float16
 compute_type = int8_float16
-
-# Beam search width. Higher values explore more hypotheses and often produce
-# better transcriptions at the cost of speed.
-# Range: 1–10  |  Default: 5
 beam_size = 5
-
-# Number of candidates sampled per step (temperature-based sampling). Only
-# relevant when temperature > 0. Mirrors the Whisper original setting.
-# Default: 5
 best_of = 5
-
-# Penalise repeated n-grams to reduce hallucinated loops. Values > 1.0
-# discourage repetition; 1.0 disables the penalty.
-# Default: 1.1
-repetition_penalty = 1.1
-
-# Enable Silero VAD (Voice Activity Detection) to skip silent sections. This
-# meaningfully reduces transcription time for recordings with long silences.
-# Default: true
-vad_filter = true
-
-# Minimum silence duration in milliseconds that VAD will treat as a gap.
-# Shorter values keep more marginal speech; longer values are more aggressive.
-# Default: 500
+repetition_penalty = 1.0
+vad_filter = false
 vad_min_silence_ms = 500
-
-# Padding in milliseconds added around each detected speech segment.
-# Prevents clipping the first or last word of a sentence.
-# Default: 400
 vad_speech_pad_ms = 400
 
 
 # -----------------------------------------------------------------------------
-# [data_repo] — The separate git repository for audio and transcription data
+# Separate evidence repositories (recommended)
 # -----------------------------------------------------------------------------
-[data_repo]
+# Large immutable audio and text evidence have independent git histories.
+# Remote URLs belong in AUDIO_REPO_URL and TRANSCRIPT_REPO_URL in .env.
+[audio_repo]
 
-# Path to the local data repository. This repository stores all downloaded
-# audio files, transcription text files, and the manifest.json index.
-# It is intentionally separate from the code repository so that the large
-# binary audio files never end up inside the OctoScribe source tree.
-#
-# The ~ shortcut expands to the current user's home directory.
-# Default: ~/.octoscribe/data
-path = ~/.octoscribe/data
-
-# Git branch to use inside the data repository.
-# Default: main
+path = ~/.octoscribe/audio-data
 branch = main
-
-# Automatically commit and push the data repository after each successful
-# pipeline run. Requires DATA_REPO_URL to be set in .env (or the remote
-# to have been added manually).
-# Default: true
 auto_push = true
 
+[transcript_repo]
+
+path = ~/.octoscribe/transcript-data
+branch = main
+auto_push = true
+
+# Legacy shared-repository deployments remain supported. To keep the historical
+# layout, remove/comment [audio_repo] and [transcript_repo], then uncomment:
+#
+# [data_repo]
+# path = ~/.octoscribe/data
+# branch = main
+# auto_push = true
+
 
 # -----------------------------------------------------------------------------
-# [paths] — Subdirectory and file names inside the data repository
+# [paths] — Evidence layout
 # -----------------------------------------------------------------------------
-# All paths here are relative to data_repo.path.
 [paths]
 
-# Subdirectory for downloaded audio files.
-# Default: audio
+# Relative to audio_repo.path.
 audio_dir = audio
 
-# Subdirectory for plain-text transcription files (one .txt per audio file).
-# Default: transcriptions
+# Relative to transcript_repo.path.
 transcriptions_dir = transcriptions
-
-# Name of the manifest JSON file that tracks every processed file.
-# Default: manifest.json
 manifest_file = manifest.json
+artifacts_dir = candidates
+reports_dir = reports
 
-# Directory for Telegram session files. These files contain your Telegram
-# login session and are highly sensitive — treat them like passwords.
-# This path is relative to the OctoScribe project root, NOT the data repo.
-# Default: .session
-session_dir = .session
+# Telegram's SQLite session is a credential. Keep this absolute path outside
+# both evidence repositories. The GitHub Action overrides it with a temporary,
+# permission-restricted runner path and removes it after execution.
+session_dir = ~/.octoscribe/session

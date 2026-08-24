@@ -2,7 +2,7 @@ name: OctoScribe Pipeline
 
 on:
   schedule:
-    # Run every Monday at 06:00 UTC — adjust to your timezone
+    # Run every Monday at 06:00 UTC — adjust to your timezone.
     - cron: '0 6 * * 1'
   workflow_dispatch:
     inputs:
@@ -17,8 +17,31 @@ on:
           - transcribe
           - sync
           - status
+      source:
+        description: 'Audio source used by run/download'
+        required: false
+        default: 'telegram'
+        type: choice
+        options:
+          - telegram
+          - folder
+      source_folder:
+        description: 'Runner path prepared with audio files when source=folder'
+        required: false
+        default: ''
+        type: string
+      providers:
+        description: 'Ordered ASR providers (for example openai,xai,meta)'
+        required: false
+        default: ''
+        type: string
+      primary_provider:
+        description: 'Canonical provider (defaults to first enabled provider)'
+        required: false
+        default: ''
+        type: string
       no_push:
-        description: 'Skip git push (dry-run mode)'
+        description: 'Create local commits but skip the final git push'
         required: false
         default: false
         type: boolean
@@ -44,9 +67,26 @@ jobs:
           git-user:  ${{ secrets.GIT_USER }}
           git-email: ${{ secrets.GIT_EMAIL }}
 
-      - name: Clone Data Repository
-        run: |
-          /bin/git clone git@github.com:${{ vars.DATA_REPO_ORG }}/${{ vars.DATA_REPO_NAME }}.git ./data
+      - name: Clone Audio Repository
+        if: ${{ vars.AUDIO_REPO_NAME != '' }}
+        env:
+          REPO_ORG: ${{ vars.AUDIO_REPO_ORG || vars.DATA_REPO_ORG }}
+          REPO_NAME: ${{ vars.AUDIO_REPO_NAME }}
+        run: /bin/git clone "git@github.com:${REPO_ORG}/${REPO_NAME}.git" ./audio-data
+
+      - name: Clone Transcript Repository
+        if: ${{ vars.TRANSCRIPT_REPO_NAME != '' }}
+        env:
+          REPO_ORG: ${{ vars.TRANSCRIPT_REPO_ORG || vars.DATA_REPO_ORG }}
+          REPO_NAME: ${{ vars.TRANSCRIPT_REPO_NAME }}
+        run: /bin/git clone "git@github.com:${REPO_ORG}/${REPO_NAME}.git" ./transcript-data
+
+      - name: Clone Legacy Shared Data Repository
+        if: ${{ vars.AUDIO_REPO_NAME == '' && vars.TRANSCRIPT_REPO_NAME == '' }}
+        env:
+          REPO_ORG: ${{ vars.DATA_REPO_ORG }}
+          REPO_NAME: ${{ vars.DATA_REPO_NAME }}
+        run: /bin/git clone "git@github.com:${REPO_ORG}/${REPO_NAME}.git" ./data
 
       - name: Run OctoScribe
         uses: octoleo/octoscribe@v1
@@ -56,9 +96,22 @@ jobs:
           telegram_phone:       ${{ secrets.TELEGRAM_PHONE }}
           telegram_session_b64: ${{ secrets.TELEGRAM_SESSION_B64 }}
           telegram_group:       ${{ vars.TELEGRAM_GROUP }}
+          source:               ${{ github.event.inputs.source || vars.SOURCE_MODE || 'telegram' }}
+          source_folder:        ${{ github.event.inputs.source_folder || vars.SOURCE_FOLDER || '' }}
+
           openai_api_key:       ${{ secrets.OPENAI_API_KEY }}
+          xai_api_key:          ${{ secrets.XAI_API_KEY }}
+          meta_asr_url:         ${{ vars.META_ASR_URL }}
+          meta_asr_api_key:     ${{ secrets.META_ASR_API_KEY }}
+          meta_asr_model:       ${{ vars.META_ASR_MODEL }}
+          meta_asr_language:    ${{ vars.META_ASR_LANGUAGE || 'eng_Latn' }}
+          providers:            ${{ github.event.inputs.providers || vars.OCTOSCRIBE_ASR_PROVIDERS || '' }}
+          primary_provider:     ${{ github.event.inputs.primary_provider || vars.OCTOSCRIBE_PRIMARY_ASR || '' }}
+
+          audio_repo_path:      ${{ vars.AUDIO_REPO_NAME != '' && './audio-data' || '' }}
+          transcript_repo_path: ${{ vars.TRANSCRIPT_REPO_NAME != '' && './transcript-data' || '' }}
           data_repo_path:       ./data
-          transcribe_backend:   ${{ vars.TRANSCRIBE_BACKEND || 'openai' }}
+          transcribe_backend:   ${{ vars.TRANSCRIBE_BACKEND || '' }}
           command:              ${{ github.event.inputs.command || 'run' }}
           no_push:              ${{ github.event.inputs.no_push || 'false' }}
           verbose:              ${{ github.event.inputs.verbose || 'false' }}

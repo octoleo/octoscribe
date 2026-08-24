@@ -27,8 +27,13 @@ jobs:
 
       - name: Install dependencies
         run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
           pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+
+      - name: Compile Python sources
+        run: python3 -m compileall -q src octoscribe.py
 
       - name: Run tests
         run: |

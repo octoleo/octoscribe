@@ -1,0 +1,5 @@
+-r requirements.txt
+
+# Optional legacy/local provider. Not installed by default because the model
+# runtime is large and is not part of the recommended fidelity path.
+faster-whisper>=1.0.3

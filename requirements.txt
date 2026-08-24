@@ -21,14 +21,9 @@
 # https://github.com/LonamiWebs/Telethon
 telethon>=1.36.0
 
-# OpenAI Python SDK — used for the gpt-4o-transcribe transcription backend.
+# OpenAI Python SDK — used for the current gpt-transcribe API contract.
 # https://github.com/openai/openai-python
-openai>=1.30.0
-
-# Faster-Whisper — local CTranslate2-based Whisper inference.
-# Requires CTranslate2-compatible CUDA libraries for GPU acceleration.
-# https://github.com/SYSTRAN/faster-whisper
-faster-whisper>=1.0.3
+openai>=2.0.0
 
 # Load .env files into os.environ before config parsing.
 # https://github.com/theskumar/python-dotenv
@@ -41,29 +36,3 @@ tqdm>=4.66.0
 # Audio metadata (duration, bitrate, codec) without decoding the full file.
 # https://github.com/quodlibet/mutagen
 mutagen>=1.47.0
-
-# Anthropic SDK — reserved for a future LLM review / summarisation stage.
-# Not used in the current release; included now to avoid a separate install step.
-# https://github.com/anthropics/anthropic-sdk-python
-anthropic>=0.28.0
-
-
-# -----------------------------------------------------------------------------
-# Testing dependencies
-# -----------------------------------------------------------------------------
-
-# Core test runner.
-# https://github.com/pytest-dev/pytest
-pytest>=8.2.0
-
-# asyncio support for testing Telethon and other async code.
-# https://github.com/pytest-dev/pytest-asyncio
-pytest-asyncio>=0.23.0
-
-# unittest.mock integration and convenient mock fixtures.
-# https://github.com/pytest-dev/pytest-mock
-pytest-mock>=3.14.0
-
-# Coverage measurement and HTML/XML reporting.
-# https://github.com/pytest-dev/pytest-cov
-pytest-cov>=5.0.0

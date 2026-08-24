@@ -1,200 +1,232 @@
 # OctoScribe Testing Guide
 
-This guide explains how the OctoScribe test suite is structured, how to run it,
-and how to add to it. It is aimed at contributors.
+The test suite treats fidelity, bounded execution, and evidence preservation as
+contracts rather than prompt aspirations. Provider and Telegram tests do not
+make live network calls or spend API credits. Filesystem tests use temporary
+directories, and the one real audio-tool integration test generates its own WAV
+file locally.
 
-For how the code itself works, see [`docs/ARCHITECTURE.md`](ARCHITECTURE.md).
-
----
-
-## Table of contents
-
-1. [Philosophy](#philosophy)
-2. [Setup](#setup)
-3. [Running the tests](#running-the-tests)
-4. [What each test file covers](#what-each-test-file-covers)
-5. [Shared fixtures (`conftest.py`)](#shared-fixtures-conftestpy)
-6. [How external services are mocked](#how-external-services-are-mocked)
-7. [Writing a new test](#writing-a-new-test)
-8. [How tests run in CI](#how-tests-run-in-ci)
-
----
-
-## Philosophy
-
-The suite follows one rule above all: **a test must never touch the real
-world.** No network calls, no Telegram login, no OpenAI billing, no GPU, no
-files outside a temporary directory. Every external dependency is mocked, and
-every file operation happens under pytest's `tmp_path`.
-
-This is what lets the whole suite run in well under a second on any machine —
-including CI runners with no credentials and no hardware — and makes every test
-deterministic. The three external systems are stubbed as follows:
-
-* **Telethon** (Telegram) — patched with `AsyncMock`/`MagicMock`.
-* **OpenAI** — the client is patched; transcription returns canned text or
-  raises canned errors to exercise the retry logic.
-* **Faster-Whisper** — the model is patched; the import-time CUDA setup is never
-  actually run.
-
-Because the source/backend seams are small interfaces, tests frequently inject a
-`MagicMock(spec=TranscriptionBackend)` straight into the `Transcriber` and assert
-the orchestration without any real backend at all.
-
----
+For the implementation model, see [Architecture](ARCHITECTURE.md).
 
 ## Setup
 
-The test dependencies are part of `requirements.txt`, so a normal install
-already gives you everything you need:
-
 ```bash
 python3.11 -m venv .venv
-source .venv/bin/activate          # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
+source .venv/bin/activate
+pip install -r requirements-dev.txt
 ```
 
-The relevant test packages are `pytest`, `pytest-asyncio` (for the async
-Telegram code), `pytest-mock`, and `pytest-cov`.
+`requirements-dev.txt` includes the core runtime and pytest tooling. It does
+not install the optional Faster-Whisper runtime; local backend tests replace
+that dependency with a test double.
 
----
+The real chunk materialization test runs when `ffmpeg` and `ffprobe` are on
+`PATH` and skips cleanly otherwise.
 
-## Running the tests
-
-From the project root:
+## Run tests
 
 ```bash
-# Run the whole suite
-pytest
+# Whole suite
+python -m pytest
 
-# Verbose — show every test name
-pytest -v
+# Detailed names and short tracebacks
+python -m pytest tests/ -v --tb=short
 
-# Run one file
-pytest tests/test_transcribe.py
+# Fidelity-critical areas
+python -m pytest \
+  tests/test_chunking.py \
+  tests/test_consensus.py \
+  tests/test_ensemble.py \
+  tests/test_evidence.py
 
-# Run one test by name
-pytest tests/test_transcribe.py::test_openai_backend_retries_on_rate_limit
+# A single behaviour
+python -m pytest \
+  tests/test_ensemble.py::test_third_provider_runs_only_after_retry_and_loop_stops
 
-# Run every test whose name matches a keyword
-pytest -k retry
+# Keyword selection
+python -m pytest -k "hash or needs_review"
 ```
 
-### With coverage
+Coverage:
 
 ```bash
-# Terminal summary of which lines in src/ are not covered
-pytest --cov=src --cov-report=term-missing
-
-# Full HTML report
-pytest --cov=src --cov-report=html
-# then open htmlcov/index.html
+python -m pytest --cov=src --cov-report=term-missing
+python -m pytest --cov=src --cov-report=html
 ```
 
-This mirrors what CI runs (see [below](#how-tests-run-in-ci)).
+## Coverage map
 
----
+| Test file | Primary contract |
+| --- | --- |
+| `test_audio_chunks.py` | ffprobe/ffmpeg command construction, silence parsing, deterministic WAV extraction, size limits, cleanup, and tool timeouts. |
+| `test_audio_chunks_ffmpeg_integration.py` | Real generated audio is probed, silence-detected, extracted twice, hashed identically, and verified as mono 16 kHz PCM. |
+| `test_chunking.py` | Gapless silence-aware planning, eight-minute/12-second defaults, hard limits, deterministic ties, exact conservative seams, and randomized invariants. |
+| `test_consensus.py` | Comparison-only normalization, additions/deletions/substitutions, critical negation/number/Scripture detection, and bounded policy decisions. |
+| `test_ensemble.py` | One/two/three-provider flows, primary ownership, one retry, one arbiter, provider outages, seam downgrade, source hashes, and evidence persistence. |
+| `test_evidence.py` | Schema validation, source/chunk/transcript hashes, deterministic JSON, append-only conflicts, safe filenames, reports, seams, and audio revisions. |
+| `test_provider.py` | Provider transcript and timed-word validation plus detailed-backend adaptation. |
+| `test_backend_registry.py` | Canonical provider names, ordered lazy construction, model provenance, duplicates, and bad configuration. |
+| `test_xai_backend.py` | Pinned endpoint, multipart fidelity options, response parsing, word timestamps, retries, size checks, and secret-safe errors. |
+| `test_meta_backend.py` | Explicit ASR URL resolution, HTTPS/loopback rules, multipart model/language, optional bearer token, response formats, retries, and validation. |
+| `test_transcribe.py` | OpenAI and optional local adapter contracts, transport retries, empty output, backend compatibility, and batch orchestration. |
+| `test_transcriber_ensemble.py` | Batch integration with the ensemble, `needs-review` quarantine, hashes, provider failures, and manifest/report links. |
+| `test_transcribe_cmd.py` | Standalone transcription's committed-audio gate and revision provenance. |
+| `test_transcribe_hardening.py` | Collision-safe output paths and the empty-result failure guard. |
+| `test_retry.py` | Transient/permanent error classification, backoff, exhaustion, and hard retry bounds. |
+| `test_manifest.py` | Source-hash immutability, quality states, pending queries, human verification, stats, atomic JSON, and thread safety. |
+| `test_folder.py` | Recursive/flat scans, supported formats, content-hash dedup, resume, copy verification, and source preservation. |
+| `test_telegram.py`, `test_telegram_client.py` | Audio selection, metadata, download behaviour, entity resolution, session handling, and Telegram retries with Telethon mocked. |
+| `test_repository.py` | Clone/init/pull, expected branch, append-only audio gate, tracked-source proof, split commit order, push failures, timeouts, and secret path protection. |
+| `test_config.py` | Precedence, provider discovery/order, command-aware secrets, split/legacy repositories, endpoint rules, path resolution, and numeric bounds. |
+| `test_source_cmd.py` | CLI overrides and folder/Telegram source dispatch. |
+| `test_ci_export_cmd.py`, `test_session_cmd.py`, `test_debug.py` | CI export guard/redaction, Telegram session commands, and diagnostic behaviour. |
+| `test_persistence.py` | Atomic text writes and periodic manifest saves. |
 
-## What each test file covers
+## Fidelity properties under test
 
-| Test file | Subject under test | Focus |
-| --------- | ------------------ | ----- |
-| `test_config.py` | `src/config/` | Multi-source loading, precedence, source selection, path resolution, and that every missing-required setting produces a clear error. |
-| `test_persistence.py` | `src/persistence.py` | Atomic-write tmp-then-rename behaviour, cleanup on failure, and `PeriodicSaver` cadence. |
-| `test_telegram_client.py` | `src/telegram_client.py` | Session restore from `TELEGRAM_SESSION_B64`, session path derivation, and entity resolution (username vs numeric id). |
-| `test_telegram.py` | `src/telegram.py` | Audio detection, metadata extraction, filename building, the download loop, dedup, and resume — all with Telethon mocked. |
-| `test_folder.py` | `src/folder.py` | Folder scan (recursive/flat), content-hash dedup, resume, copy behaviour, and error handling. Uses the real filesystem. |
-| `test_manifest.py` | `src/manifest.py` | State transitions, the `pending_*` queries, stats, JSON integrity, and thread-safety. |
-| `test_transcribe.py` | `src/transcribe/` | Backend factory, OpenAI and local backends, retry on transient errors, no-retry on permanent errors, and the orchestrator's success/failure/skip paths. |
-| `test_transcribe_hardening.py` | `src/transcribe/transcriber.py` | The two stability guarantees: collision-safe output names and the empty-result-is-a-failure guard. |
-| `test_retry.py` | `src/transcribe/backends/retry.py` | The `ErrorClassifier` patterns and the `RetryPolicy` loop (backoff, exhaustion, immediate raises) — with `time.sleep` patched so it runs instantly. |
-| `test_repository.py` | `src/repository.py` | `ensure_ready` clone/init/pull branches, commit/push, nothing-to-commit, and status — with `subprocess.run` mocked. |
-| `test_source_cmd.py` | `octoscribe.py` | `build_overrides` flag→config translation and the `acquire_audio` dispatch between folder and Telegram. |
-| `test_session_cmd.py` | `octoscribe.py` | The `session export`/`check` subcommand. |
-| `test_ci_export_cmd.py` | `octoscribe.py` | The `ci-export` output and its guard that refuses to run inside a CI environment. |
-| `test_debug.py` | `src/debug.py` | The `DebugInspector` metadata dump, with Telethon mocked. |
+### Source identity
 
----
+Tests prove that a stored audio digest cannot be replaced by a different
+SHA-256 value, that folder copies are verified, that the ensemble rejects an
+unexpected source hash before provider work, and that evidence writing rechecks
+source and chunk bytes.
 
-## Shared fixtures (`conftest.py`)
+When modifying acquisition or repository code, include at least these cases:
 
-`tests/conftest.py` provides the fixtures most tests build on:
+- identical bytes resume without duplication;
+- changed bytes under an existing identity fail;
+- a failed or corrupt copy does not remain as accepted audio;
+- transcript publication cannot proceed after an audio commit/tracking failure.
 
-* **`tmp_data_dir`** — a temporary directory pre-populated with `audio/` and
-  `transcriptions/` subdirs, standing in for the data repository.
-* **`sample_config`** — a fully populated `Config` with fake-but-valid
-  credentials and all paths pointing inside `tmp_data_dir`. Constructing it has
-  no side effects, so tests can use it freely.
-* **`sample_audio_folder`** — a temp folder containing two audio files (one
-  nested) plus a non-audio file that the importer must ignore.
-* **`folder_config`** — `sample_config` flipped into `source.mode == "folder"`,
-  pointing at `sample_audio_folder`.
-* **`tmp_manifest`** — a fresh, empty `Manifest` backed by a temp file.
-* **`populated_manifest`** — a `Manifest` with three downloaded entries, two of
-  them already transcribed and one pending, for exercising the `pending_*`
-  queries.
+### Chunk planning and seams
 
-Because `sample_config` already wires every path into a temp directory, most
-tests are just "take the fixture, run the unit, assert on the manifest or the
-files it produced."
+Chunk tests use both examples and seeded randomized inputs. Every non-empty plan
+must satisfy:
 
----
+- cores begin at zero and end at the recording duration;
+- adjacent cores meet exactly, with no gap or double ownership;
+- context windows remain within the hard maximum;
+- adjacent contexts share exactly the configured overlap;
+- reversing or duplicating silence inputs does not change the plan.
 
-## How external services are mocked
+Production seam defaults require six exact normalized matching tokens and
+similarity `1.0`. Tests specifically guard against deleting text when there is
+a substitution, insertion, deletion, short common phrase, or unrelated seam.
+If no seam is accepted, both surfaces remain and the overall result becomes
+`needs_review`.
 
-A quick reference for the patterns you'll see and should reuse:
+### Provider independence and hard stop
 
-* **Telegram (async).** Telethon's `TelegramClient` is replaced with a
-  `MagicMock` whose async methods (`start`, `get_messages`, `download_media`,
-  `get_entity`) are `AsyncMock`s. Messages are built as `SimpleNamespace`/typed
-  Telethon objects so `is_audio`/`get_audio_metadata` can inspect them.
-* **OpenAI.** The backend imports `openai` lazily in its constructor, so tests
-  patch `openai.OpenAI` (or inject a pre-built mock client) and set
-  `client.audio.transcriptions.create` to return canned text or raise a
-  classified error.
-* **Faster-Whisper.** Patched at `faster_whisper.WhisperModel`; the local
-  backend's `transcribe` is driven with fake segment objects.
-* **git.** `subprocess.run` is patched so `DataRepository` can be tested without
-  a real git binary or network remote.
-* **Time.** `time.sleep` is patched in the retry tests so backoff is exercised
-  without actually waiting.
+The ensemble suite injects simple backends with scripted results and call
+counts. It proves the maximum semantic call pattern per chunk:
 
----
+| Providers | Maximum semantic calls after disagreement |
+| --- | --- |
+| One | one primary call |
+| Two | initial pair plus one retry of the pair |
+| Three, normal disagreement | initial pair, one retry of the pair, then one arbiter call |
+| Three, checker outage | initial pair and one fallback call; then at most one retry of primary + fallback, or of the original pair if fallback also fails |
 
-## Writing a new test
+Transport-level retries inside a backend have their own bounded unit tests;
+the configured default is one transient retry and the OpenAI SDK's internal
+retry layer is disabled.
+Tests must never replace this finite state machine with a loop whose bound
+depends on provider text.
 
-1. Start from a fixture. If you need a config, take `sample_config`; if you need
-   state, take `tmp_manifest` or `populated_manifest`.
-2. Keep everything inside `tmp_path` — never write to a real path.
-3. Mock at the seam, not deep inside. For transcription, prefer injecting a
-   `MagicMock(spec=TranscriptionBackend)` into the `Transcriber` over patching
-   `openai`. For a source, patch the Telethon client method you depend on.
-4. Assert on observable outcomes: the manifest entry that was written, the file
-   that appeared in `transcriptions/`, or the stats summary returned — not on
-   internal call order unless that *is* the contract (as in
-   `test_source_cmd.py`).
-5. Mark async tests with `@pytest.mark.asyncio`.
+The canonical result is asserted separately from agreement. Tests prove that a
+third provider or majority cannot silently rewrite the primary, and that an
+unresolved result remains `needs_review`.
 
-When you add a new backend or source (see *Extending OctoScribe* in the
-[architecture doc](ARCHITECTURE.md#extending-octoscribe)), add both an
-orchestration test (mock injected) and a unit test for the new component itself.
+### Evidence preservation
 
----
+Candidate assertions should inspect persisted JSON, not just call counts. A
+candidate must identify the source, exact chunk, provider/model/attempt, raw
+transcript, transcript hash, and run, plus optional word timings, confidence,
+language, and duration when supplied by a provider. Aggregate reports must
+identify the canonical attempt and the exact attempts used by every initial,
+retry, fallback, availability, or arbitration comparison.
 
-## How tests run in CI
+Include failure-path tests where useful. Successful paid candidates must remain
+available even when a later chunk or the primary provider fails.
 
-`.github/workflows/ci.yml` runs the suite on every push and pull request to the
-`main` and `v1` branches. It:
+### Truthful states
 
-1. Checks out the repo.
-2. Sets up Python — on a **matrix of 3.11 and 3.12** — with pip caching.
-3. Installs `requirements.txt`.
-4. Runs `pytest tests/ -v --cov=src --cov-report=xml --cov-report=term-missing
-   --tb=short`.
-5. Uploads the coverage report to Codecov (only on the 3.12 leg;
-   non-blocking).
+Do not assert a generic `completed` state for new ensemble output. Assert one
+of:
 
-`fail-fast: false` means a failure on one Python version still lets the other
-finish, so you see the full picture. This workflow is entirely separate from the
-scheduled *pipeline* workflow that actually downloads and transcribes audio —
-see [Running under GitHub Actions](ARCHITECTURE.md#running-under-github-actions).
+- `machine_transcribed` for a one-provider result;
+- `cross_checked` only after independent normalized-word agreement and proven
+  seams;
+- `needs_review` for unresolved disagreement, unavailable independent
+  verification, or an unresolved seam;
+- `human_verified` only after an explicit human-verification operation.
+
+Also assert the output location: unresolved text belongs below
+`transcriptions/needs-review/`.
+
+## Test-double patterns
+
+### Providers
+
+Prefer injecting a small `TranscriptionBackend` implementation into the
+ensemble or transcriber. Script text and exceptions per call, then assert both
+the call bound and persisted outcome. Test a concrete adapter separately at its
+HTTP/SDK seam.
+
+- OpenAI uses a mocked `client.audio.transcriptions.create` method.
+- xAI and Meta inject a fake urllib-compatible transport.
+- Faster-Whisper replaces `faster_whisper.WhisperModel` with fake segments.
+
+Never use real provider keys in tests, fixtures, snapshots, or CI logs.
+
+### Audio tools
+
+Pure planning tests do not call ffmpeg. Unit tests inject a subprocess runner
+and assert arguments/results. The integration test is intentionally narrow: it
+generates PCM samples, uses local ffmpeg/ffprobe, and performs no network I/O.
+
+### Telegram and git
+
+Telegram tests replace asynchronous client methods with `AsyncMock`. Repository
+unit tests replace `subprocess.run` and explicitly model stdout, stderr, exit
+codes, timeout exceptions, and branch state. Temporary real git repositories
+may be used only when they remain inside `tmp_path` and require no remote.
+
+## Adding or changing functionality
+
+For a new provider, add tests for:
+
+1. configuration and canonical registry name;
+2. missing credential/endpoint rejection before a request;
+3. exact request contract and unchanged transcript extraction;
+4. empty/malformed response rejection;
+5. transient retry and permanent failure;
+6. timeout and upload limits;
+7. secret redaction;
+8. participation in one-, two-, and three-provider ensemble roles;
+9. provenance model name in candidate/report evidence.
+
+For a chunking or comparison change, add deterministic regression examples and
+seeded property-style cases. Any change that can remove a word needs a direct
+test proving what exact evidence authorizes that removal.
+
+For a manifest or evidence schema change, test older accepted input where
+compatibility is intended, deterministic serialization, idempotent identical
+writes, and rejection of conflicting replacement.
+
+## CI
+
+`.github/workflows/ci.yml` runs on pushes and pull requests targeting `main` or
+`v1`, with Python 3.11 and 3.12. It installs `requirements-dev.txt`, runs the
+full suite with coverage, and uploads the Python 3.12 coverage file to Codecov
+without making Codecov availability a test gate.
+
+The CI test workflow is distinct from `.github/workflows/pipeline.yml`, which
+is the credentialed operational workflow that acquires and transcribes real
+audio.
+
+CI validates provider contracts offline. Before promoting a model or provider
+configuration, separately evaluate it on a private, human-verified sermon set
+covering the actual speakers, microphones, accents, biblical names, references,
+and recording conditions. Never commit that private evaluation audio or its
+credentials to this code repository.
