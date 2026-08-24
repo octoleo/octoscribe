@@ -15,7 +15,12 @@ from unittest.mock import MagicMock, call, patch
 import pytest
 
 from src.config import DataRepoConfig
-from src.repository import DataRepoError, DataRepository, GitResult
+from src.repository import (
+    DataRepoError,
+    DataRepository,
+    EvidenceRepositories,
+    GitResult,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +124,8 @@ class TestEnsureReady:
             if cmd[1] == "clone":
                 # Simulate git creating the .git dir so subsequent calls work.
                 (repo_path / ".git").mkdir(parents=True, exist_ok=True)
+            if cmd[1:3] == ["branch", "--show-current"]:
+                return _fake_run_success(stdout="main")
             return _fake_run_success()
 
         with patch("subprocess.run", side_effect=fake_run) as mock_run:
@@ -135,6 +142,8 @@ class TestEnsureReady:
         def fake_run(cmd, **kwargs):
             if cmd[1] == "init":
                 (repo_path / ".git").mkdir(parents=True, exist_ok=True)
+            if cmd[1:3] == ["branch", "--show-current"]:
+                return _fake_run_success(stdout="main")
             return _fake_run_success()
 
         with patch("subprocess.run", side_effect=fake_run) as mock_run:
@@ -174,6 +183,33 @@ class TestEnsureReady:
 
         assert (tmp_path / "audio").is_dir()
         assert (tmp_path / "transcriptions").is_dir()
+
+    def test_installs_sensitive_session_excludes(self, tmp_path: Path) -> None:
+        _init_real_repo(tmp_path)
+        repo = DataRepository(make_config(tmp_path))
+        with patch.object(
+            repo, "pull", return_value=GitResult(0, "", "", ["git", "pull"])
+        ):
+            repo.ensure_ready()
+
+        exclude = (tmp_path / ".git" / "info" / "exclude").read_text()
+        assert "*.session" in exclude
+        assert "*.session-journal" in exclude
+        assert ".env" in exclude
+
+    def test_rejects_already_tracked_session_database(self, tmp_path: Path) -> None:
+        _init_real_repo(tmp_path)
+        (tmp_path / "octoscribe.session").write_bytes(b"secret session")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", "octoscribe.session"],
+            check=True,
+        )
+        repo = DataRepository(make_config(tmp_path))
+        with patch.object(
+            repo, "pull", return_value=GitResult(0, "", "", ["git", "pull"])
+        ):
+            with pytest.raises(DataRepoError, match="sensitive"):
+                repo.ensure_ready()
 
     def test_raises_when_clone_fails(self, tmp_path: Path) -> None:
         repo_path = tmp_path / "data"
@@ -257,6 +293,58 @@ class TestCommitAndPush:
 
         assert result.success is True
         assert "nothing to commit" in result.stdout
+
+    def test_preserves_real_commit_failure(self, tmp_path: Path) -> None:
+        _init_real_repo(tmp_path)
+        repo = DataRepository(make_config(tmp_path))
+
+        def fake_run(cmd, **kwargs):
+            if "commit" in cmd:
+                return _fake_run_failure(stderr="commit signing failed")
+            return _fake_run_success()
+
+        with patch("subprocess.run", side_effect=fake_run):
+            result = repo.commit_and_push("test commit")
+
+        assert result.success is False
+        assert "signing failed" in result.stderr
+
+    def test_noop_commit_still_retries_prior_failed_push(self, tmp_path: Path) -> None:
+        _init_real_repo(tmp_path)
+        repo = DataRepository(make_config(tmp_path, auto_push=True))
+
+        def fake_git(args, check=False):
+            if args[0] == "commit":
+                return GitResult(1, "nothing to commit", "", ["git", *args])
+            if args[0] == "push":
+                return GitResult(0, "pushed prior commit", "", ["git", *args])
+            return GitResult(0, "", "", ["git", *args])
+
+        with (
+            patch.object(repo, "_protect_sensitive_files"),
+            patch.object(repo, "_ensure_git_identity"),
+            patch.object(repo, "has_remote", return_value=True),
+            patch.object(repo, "_git", side_effect=fake_git) as git,
+        ):
+            result = repo.commit_and_push("retry push")
+
+        assert result.success
+        assert any(call.args[0][0] == "push" for call in git.call_args_list)
+
+    @pytest.mark.parametrize("suffix", ["-wal", "-shm", "-journal"])
+    def test_direct_commit_rejects_tracked_session_sidecar(
+        self, tmp_path: Path, suffix: str
+    ) -> None:
+        _init_real_repo(tmp_path)
+        sensitive = tmp_path / f"octoscribe.session{suffix}"
+        sensitive.write_bytes(b"secret")
+        subprocess.run(
+            ["git", "-C", str(tmp_path), "add", sensitive.name],
+            check=True,
+        )
+        repo = DataRepository(make_config(tmp_path))
+        with pytest.raises(DataRepoError, match="sensitive"):
+            repo.commit_and_push("must refuse")
 
     def test_pushes_when_auto_push_true_and_has_remote(self, tmp_path: Path) -> None:
         _init_real_repo(tmp_path)
@@ -418,6 +506,133 @@ class TestCreateSubdirectories:
 
         assert (tmp_path / "audio").is_dir()
         assert (tmp_path / "transcriptions").is_dir()
+
+
+class TestEvidenceRepositories:
+    def test_split_mode_never_updates_text_after_audio_failure(
+        self, tmp_path: Path
+    ) -> None:
+        from types import SimpleNamespace
+
+        config = SimpleNamespace(
+            audio_repo=make_config(tmp_path / "audio-repo"),
+            text_repo=make_config(tmp_path / "text-repo"),
+        )
+        repositories = EvidenceRepositories(config)
+        repositories.audio = MagicMock()
+        repositories.transcripts = MagicMock()
+        repositories.audio.commit_and_push.return_value = GitResult(
+            1, "", "push rejected", ["git", "push"]
+        )
+
+        with pytest.raises(DataRepoError, match="transcript evidence was not"):
+            repositories.commit_and_push("update")
+
+        repositories.transcripts.commit_and_push.assert_not_called()
+
+    def test_split_mode_commits_audio_before_text(self, tmp_path: Path) -> None:
+        from types import SimpleNamespace
+
+        config = SimpleNamespace(
+            audio_repo=make_config(tmp_path / "audio-repo"),
+            text_repo=make_config(tmp_path / "text-repo"),
+        )
+        repositories = EvidenceRepositories(config)
+        order: list[str] = []
+        repositories.audio = MagicMock()
+        repositories.transcripts = MagicMock()
+        repositories.audio.commit_and_push.side_effect = lambda _message, **_kwargs: (
+            order.append("audio") or GitResult(0, "ok", "", ["git", "commit"])
+        )
+        repositories.transcripts.commit_and_push.side_effect = lambda _message, **_kwargs: (
+            order.append("text") or GitResult(0, "ok", "", ["git", "commit"])
+        )
+
+        results = repositories.commit_and_push("update")
+
+        assert order == ["audio", "text"]
+        assert results["audio"].success and results["transcripts"].success
+
+    def test_transcript_update_failure_is_not_reported_as_success(
+        self, tmp_path: Path
+    ) -> None:
+        from types import SimpleNamespace
+
+        config = SimpleNamespace(
+            audio_repo=make_config(tmp_path / "audio-repo"),
+            text_repo=make_config(tmp_path / "text-repo"),
+        )
+        repositories = EvidenceRepositories(config)
+        repositories.transcripts = MagicMock()
+        repositories.transcripts.commit_and_push.return_value = GitResult(
+            1, "", "push rejected", ["git", "push"]
+        )
+
+        with pytest.raises(DataRepoError, match="transcript evidence repository"):
+            repositories.commit_transcripts("update")
+
+    def test_ignored_audio_cannot_pass_commit_gate(self, tmp_path: Path) -> None:
+        repo_path = tmp_path / "audio-repo"
+        _init_real_repo(repo_path)
+        (repo_path / ".gitignore").write_text("audio/*.mp3\n")
+        audio = repo_path / "audio" / "sermon.mp3"
+        audio.parent.mkdir()
+        audio.write_bytes(b"AUDIO")
+        repo = DataRepository(make_config(repo_path), subdirectories=("audio",))
+
+        with pytest.raises(DataRepoError, match="ignored or untracked"):
+            repo.assert_tracked_clean([audio])
+
+    def test_modified_or_deleted_audio_cannot_pass_commit_gate(
+        self, tmp_path: Path
+    ) -> None:
+        repo_path = tmp_path / "audio-repo"
+        _init_real_repo(repo_path)
+        audio = repo_path / "audio" / "sermon.mp3"
+        audio.parent.mkdir()
+        audio.write_bytes(b"ORIGINAL")
+        subprocess.run(
+            ["git", "-C", str(repo_path), "add", "audio/sermon.mp3"],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(repo_path), "commit", "-m", "audio"],
+            check=True,
+            capture_output=True,
+        )
+        repo = DataRepository(make_config(repo_path), subdirectories=("audio",))
+        assert repo.head_revision() is not None
+
+        audio.write_bytes(b"CHANGED")
+        with pytest.raises(DataRepoError, match="differs"):
+            repo.assert_tracked_clean([audio])
+
+        audio.unlink()
+        with pytest.raises(DataRepoError, match="missing"):
+            repo.assert_tracked_clean([audio])
+
+    def test_committed_evidence_directories_are_append_only(
+        self, tmp_path: Path
+    ) -> None:
+        repo_path = tmp_path / "text-repo"
+        _init_real_repo(repo_path)
+        report = repo_path / "reports" / "sermon.json"
+        report.parent.mkdir()
+        report.write_text('{"evidence": 1}\n')
+        subprocess.run(
+            ["git", "-C", str(repo_path), "add", "reports/sermon.json"],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(repo_path), "commit", "-m", "report"],
+            check=True,
+            capture_output=True,
+        )
+        repo = DataRepository(make_config(repo_path), subdirectories=("reports",))
+
+        report.write_text('{"evidence": 2}\n')
+        with pytest.raises(DataRepoError, match="immutable"):
+            repo.verify_append_only_directory(report.parent)
 
 
 # ---------------------------------------------------------------------------

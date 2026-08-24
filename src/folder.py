@@ -173,11 +173,21 @@ class FolderImporter:
     @staticmethod
     def _gather_files(folder: Path, recursive: bool) -> list[Path]:
         """Return a sorted list of audio files in *folder*."""
+        root = folder.resolve()
         if recursive:
             candidates = (p for p in folder.rglob("*") if p.is_file())
         else:
             candidates = (p for p in folder.iterdir() if p.is_file())
-        return sorted(p for p in candidates if p.suffix.lower() in AUDIO_EXTENSIONS)
+        safe: list[Path] = []
+        for path in candidates:
+            if path.is_symlink() or path.suffix.lower() not in AUDIO_EXTENSIONS:
+                continue
+            try:
+                path.resolve(strict=True).relative_to(root)
+            except (OSError, ValueError):
+                continue
+            safe.append(path)
+        return sorted(safe)
 
     # ------------------------------------------------------------------
     # Per-file import
@@ -228,6 +238,13 @@ class FolderImporter:
 
         try:
             shutil.copy2(path, target_path)
+            copied_hash = sha256_file(target_path)
+            if copied_hash != sha256_hex:
+                target_path.unlink(missing_ok=True)
+                raise OSError(
+                    "copied audio failed SHA-256 verification; source evidence "
+                    "was not registered"
+                )
         except OSError as exc:
             log.warning("Failed to copy %s: %s", path, exc)
             self._manifest.mark_failed(key, "import", str(exc))

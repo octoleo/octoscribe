@@ -16,6 +16,17 @@ from typing import Any
 from src.persistence import atomic_write_text
 
 
+_TERMINAL_TRANSCRIPTION_STATES = frozenset(
+    {
+        "completed",  # legacy manifests
+        "machine_transcribed",
+        "cross_checked",
+        "needs_review",
+        "human_verified",
+    }
+)
+
+
 class Manifest:
     """
     Thread-safe manager for manifest.json.
@@ -68,7 +79,7 @@ class Manifest:
             return bool(entry.get("downloaded")) and bool(entry.get("filename"))
 
     def is_transcribed(self, msg_id: str | int) -> bool:
-        """Return True when transcription.status == 'completed'."""
+        """Return True once automation has reached a terminal quality state."""
         with self._lock:
             entry = self._data.get(self._str_id(msg_id))
             if entry is None:
@@ -76,7 +87,7 @@ class Manifest:
             transcription = entry.get("transcription")
             if not isinstance(transcription, dict):
                 return False
-            return transcription.get("status") == "completed"
+            return transcription.get("status") in _TERMINAL_TRANSCRIPTION_STATES
 
     def get_entry(self, msg_id: str | int) -> dict[str, Any] | None:
         """Return a shallow copy of the entry, or None if not present."""
@@ -108,13 +119,35 @@ class Manifest:
             entry["telegram_msg_id"] = int(key) if key.isdigit() else key
             self._data[key] = entry
 
+    def record_audio_hash(self, msg_id: str | int, sha256: str) -> None:
+        """Backfill or verify the immutable source hash before transcription."""
+        if (
+            not isinstance(sha256, str)
+            or len(sha256) != 64
+            or any(character not in "0123456789abcdef" for character in sha256)
+        ):
+            raise ValueError("audio hash must be a lower-case SHA-256 digest")
+        key = self._str_id(msg_id)
+        with self._lock:
+            entry = self._data.get(key)
+            if entry is None:
+                raise KeyError(f"no manifest entry exists for {key}")
+            existing = entry.get("hash")
+            if isinstance(existing, str) and len(existing) == 64 and existing != sha256:
+                raise ValueError(
+                    f"audio SHA-256 mismatch for {key}; source evidence changed"
+                )
+            entry["hash"] = sha256
+            self._data[key] = entry
+
     def mark_transcribed(self, msg_id: str | int, result: dict[str, Any]) -> None:
         """
         Record that an audio file has been transcribed.
 
         *result* should contain: output_file, model. A completed_at
         timestamp is added automatically if not already present in result.
-        The transcription sub-dict is set to status='completed'.
+        New callers should provide ``quality_state``.  Legacy callers that do
+        not provide it retain status='completed' for backwards compatibility.
         """
         key = self._str_id(msg_id)
         with self._lock:
@@ -122,7 +155,12 @@ class Manifest:
             if entry is None:
                 entry = {"telegram_msg_id": int(key) if key.isdigit() else key}
             transcription = dict(result)
-            transcription["status"] = "completed"
+            quality_state = transcription.get("quality_state")
+            if quality_state is not None and quality_state not in (
+                _TERMINAL_TRANSCRIPTION_STATES - {"completed"}
+            ):
+                raise ValueError(f"unknown transcription quality state: {quality_state!r}")
+            transcription["status"] = quality_state or "completed"
             if "completed_at" not in transcription:
                 transcription["completed_at"] = self._now_iso()
             entry["transcription"] = transcription
@@ -181,7 +219,7 @@ class Manifest:
                 transcription = entry.get("transcription")
                 transcribed = (
                     isinstance(transcription, dict)
-                    and transcription.get("status") == "completed"
+                    and transcription.get("status") in _TERMINAL_TRANSCRIPTION_STATES
                 )
                 if not transcribed:
                     result.append(dict(entry))
@@ -200,7 +238,7 @@ class Manifest:
                 1
                 for v in self._data.values()
                 if isinstance(v.get("transcription"), dict)
-                and v["transcription"].get("status") == "completed"
+                and v["transcription"].get("status") in _TERMINAL_TRANSCRIPTION_STATES
             )
             failed = sum(1 for v in self._data.values() if "failed_stage" in v)
             return {
@@ -209,6 +247,47 @@ class Manifest:
                 "transcribed": transcribed,
                 "failed": failed,
             }
+
+    def quality_stats(self) -> dict[str, int]:
+        """Return counts for truthful quality states without changing stats()."""
+        with self._lock:
+            result = {
+                "machine_transcribed": 0,
+                "cross_checked": 0,
+                "needs_review": 0,
+                "human_verified": 0,
+                "legacy_completed": 0,
+            }
+            for entry in self._data.values():
+                transcription = entry.get("transcription")
+                if not isinstance(transcription, dict):
+                    continue
+                state = transcription.get("status")
+                key = "legacy_completed" if state == "completed" else state
+                if key in result:
+                    result[key] += 1
+            return result
+
+    def mark_human_verified(
+        self,
+        msg_id: str | int,
+        *,
+        reviewer: str | None = None,
+    ) -> None:
+        """Record explicit human comparison against the source audio."""
+        key = self._str_id(msg_id)
+        with self._lock:
+            entry = self._data.get(key)
+            if entry is None or not isinstance(entry.get("transcription"), dict):
+                raise KeyError(f"no transcription exists for {key}")
+            transcription = dict(entry["transcription"])
+            transcription["status"] = "human_verified"
+            transcription["quality_state"] = "human_verified"
+            transcription["human_verified_at"] = self._now_iso()
+            if reviewer:
+                transcription["human_verified_by"] = reviewer
+            entry["transcription"] = transcription
+            self._data[key] = entry
 
     # ------------------------------------------------------------------
     # Persistence

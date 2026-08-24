@@ -67,9 +67,13 @@ def build_overrides(args: argparse.Namespace) -> dict:
     """
     overrides: dict = {}
 
-    # Data repo path override
+    # Repository path overrides. --data-repo is the legacy shared-layout alias.
     if getattr(args, "data_repo", None):
         overrides["data_repo__path"] = args.data_repo
+    if getattr(args, "audio_repo", None):
+        overrides["audio_repo__path"] = args.audio_repo
+    if getattr(args, "transcript_repo", None):
+        overrides["transcript_repo__path"] = args.transcript_repo
 
     # Telegram group override (download / run)
     if getattr(args, "group", None):
@@ -78,6 +82,10 @@ def build_overrides(args: argparse.Namespace) -> dict:
     # Transcription backend override (transcribe / run)
     if getattr(args, "backend", None):
         overrides["transcribe__backend"] = args.backend
+    if getattr(args, "providers", None):
+        overrides["transcribe__providers"] = args.providers
+    if getattr(args, "primary_provider", None):
+        overrides["transcribe__primary_provider"] = args.primary_provider
 
     # Audio source overrides (download / run).
     source = getattr(args, "source", None)
@@ -135,6 +143,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override data_repo.path from config.",
     )
     parser.add_argument(
+        "--audio-repo",
+        metavar="PATH",
+        dest="audio_repo",
+        help="Override audio_repo.path (immutable source audio).",
+    )
+    parser.add_argument(
+        "--transcript-repo",
+        metavar="PATH",
+        dest="transcript_repo",
+        help="Override transcript_repo.path (text, candidates, and reports).",
+    )
+    parser.add_argument(
         "--verbose",
         action="store_true",
         default=False,
@@ -171,6 +191,16 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="BACKEND",
         choices=["openai", "local"],
         help="Override transcription backend.",
+    )
+    run_parser.add_argument(
+        "--providers",
+        metavar="LIST",
+        help="Ordered ASR providers, e.g. openai,xai,meta (maximum three).",
+    )
+    run_parser.add_argument(
+        "--primary-provider",
+        choices=["openai", "xai", "meta", "whisper"],
+        help="Canonical transcript provider; must also be enabled.",
     )
     run_parser.add_argument(
         "--dry-run",
@@ -216,6 +246,16 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="BACKEND",
         choices=["openai", "local"],
         help="Override transcription backend.",
+    )
+    tr_parser.add_argument(
+        "--providers",
+        metavar="LIST",
+        help="Ordered ASR providers, e.g. openai,xai,meta (maximum three).",
+    )
+    tr_parser.add_argument(
+        "--primary-provider",
+        choices=["openai", "xai", "meta", "whisper"],
+        help="Canonical transcript provider; must also be enabled.",
     )
     tr_parser.add_argument(
         "--dry-run",
@@ -350,13 +390,13 @@ def _maybe_print_dry_run(args: argparse.Namespace, manifest) -> bool:
 def cmd_run(args: argparse.Namespace, config) -> None:
     """Full pipeline: sync → download → transcribe → commit/push."""
     from src.manifest import Manifest
-    from src.repository import DataRepository, DataRepoError
+    from src.repository import DataRepoError, EvidenceRepositories
     from src.transcribe import Transcriber
 
     # 1. Prepare the data repository (clone or pull).
     try:
-        repo = DataRepository(config.data_repo)
-        repo.ensure_ready()
+        repos = EvidenceRepositories(config)
+        repos.ensure_ready()
     except DataRepoError as exc:
         print(f"ERROR: Data repository error: {exc}", file=sys.stderr)
         sys.exit(1)
@@ -376,32 +416,63 @@ def cmd_run(args: argparse.Namespace, config) -> None:
         log.debug("Acquisition error detail", exc_info=True)
         sys.exit(1)
 
-    # 4. Transcribe.
+    # 4. Commit source audio before any dependent transcript can be published.
+    commit_msg = f"OctoScribe update {datetime.now().date()}"
+    try:
+        print("Committing source-audio evidence...")
+        repos.commit_audio(commit_msg, push=not getattr(args, "no_push", False))
+        recorded_audio = [
+            config.download.audio_dir / entry["filename"]
+            for entry in manifest.all_entries().values()
+            if entry.get("downloaded") and entry.get("filename")
+        ]
+        repos.assert_audio_tracked(recorded_audio)
+        audio_revision = repos.audio_revision()
+        if not audio_revision:
+            raise DataRepoError("audio repository has no committed revision")
+    except DataRepoError as exc:
+        print(f"ERROR: Audio evidence gate failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    # 5. Transcribe.
     print("Transcribing audio...")
     try:
-        tr_stats = Transcriber(config, manifest).run()
+        tr_stats = Transcriber(
+            config,
+            manifest,
+            audio_revision=audio_revision,
+            audio_repository_branch=config.audio_repo.branch,
+        ).run()
         print(tr_stats.summary())
     except Exception as exc:
         print(f"ERROR: Transcription failed: {exc}", file=sys.stderr)
         log.debug("Transcription error detail", exc_info=True)
         sys.exit(1)
 
-    # 5. Commit and push.
-    if not getattr(args, "no_push", False):
-        commit_msg = f"OctoScribe update {datetime.now().date()}"
-        print(f"Committing and pushing: {commit_msg}")
-        try:
-            result = repo.commit_and_push(commit_msg)
-            if result.success:
-                print("Repository updated successfully.")
-            else:
-                print(f"WARNING: git operation returned non-zero: {result}", file=sys.stderr)
-        except Exception as exc:
-            print(f"ERROR: Repository push failed: {exc}", file=sys.stderr)
-            log.debug("Push error detail", exc_info=True)
-            sys.exit(1)
-    else:
-        print("Skipping push (--no-push).")
+    # 6. Commit transcript evidence only after the audio revision is durable.
+    print(f"Committing transcript evidence: {commit_msg}")
+    try:
+        result = repos.commit_transcripts(
+            commit_msg,
+            push=not getattr(args, "no_push", False),
+        )
+        if result.success:
+            suffix = " (local commits only; --no-push)" if args.no_push else ""
+            print(f"Repository evidence updated successfully{suffix}.")
+        else:
+            print(f"WARNING: transcript git operation failed: {result}", file=sys.stderr)
+    except Exception as exc:
+        print(f"ERROR: Transcript repository update failed: {exc}", file=sys.stderr)
+        log.debug("Push error detail", exc_info=True)
+        sys.exit(1)
+
+    if tr_stats.failed or tr_stats.skipped:
+        print(
+            "ERROR: One or more recordings were not transcribed; failure "
+            "evidence was committed for retry.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 def cmd_download(args: argparse.Namespace, config) -> None:
@@ -422,17 +493,49 @@ def cmd_download(args: argparse.Namespace, config) -> None:
 def cmd_transcribe(args: argparse.Namespace, config) -> None:
     """Transcribe unprocessed audio only."""
     from src.manifest import Manifest
+    from src.repository import DataRepoError, EvidenceRepositories
     from src.transcribe import Transcriber
 
-    manifest = Manifest(config.download.manifest_file)
+    # Standalone transcription keeps the same source-evidence guarantee as the
+    # full pipeline: every manifest audio file must already be committed and
+    # byte-clean before a provider can receive it.
+    try:
+        repos = EvidenceRepositories(config)
+        repos.ensure_ready()
+        manifest = Manifest(config.download.manifest_file)
+        recorded_audio = [
+            config.download.audio_dir / entry["filename"]
+            for entry in manifest.all_entries().values()
+            if entry.get("downloaded") and entry.get("filename")
+        ]
+        repos.assert_audio_tracked(recorded_audio)
+        audio_revision = repos.audio_revision()
+        if not audio_revision:
+            raise DataRepoError("audio repository has no committed revision")
+    except DataRepoError as exc:
+        print(f"ERROR: Audio evidence gate failed: {exc}", file=sys.stderr)
+        sys.exit(1)
 
     if _maybe_print_dry_run(args, manifest):
         return
 
-    print(f"Transcribing audio with backend '{config.transcribe.backend}'...")
+    providers = getattr(config.transcribe, "providers", ())
+    display = ",".join(providers) if providers else config.transcribe.backend
+    print(f"Transcribing audio with provider(s) '{display}'...")
     try:
-        stats = Transcriber(config, manifest).run()
+        stats = Transcriber(
+            config,
+            manifest,
+            audio_revision=audio_revision,
+            audio_repository_branch=config.audio_repo.branch,
+        ).run()
         print(stats.summary())
+        if stats.failed or stats.skipped:
+            print(
+                "ERROR: One or more recordings were not transcribed.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
     except Exception as exc:
         print(f"ERROR: Transcription failed: {exc}", file=sys.stderr)
         log.debug("Transcription error detail", exc_info=True)
@@ -441,30 +544,36 @@ def cmd_transcribe(args: argparse.Namespace, config) -> None:
 
 def cmd_sync(args: argparse.Namespace, config) -> None:
     """Sync data repository: pull and/or push."""
-    from src.repository import DataRepository, DataRepoError
+    from src.repository import DataRepoError, EvidenceRepositories
 
     pull_only = getattr(args, "pull_only", False)
     push_only = getattr(args, "push_only", False)
 
     try:
-        repo = DataRepository(config.data_repo)
+        repos = EvidenceRepositories(config)
 
         if not push_only:
-            print("Pulling from remote...")
-            result = repo.pull()
-            if result.success:
-                print(f"  {result.stdout or 'Already up to date.'}")
-            else:
-                print(f"WARNING: pull returned non-zero:\n  {result.stderr}", file=sys.stderr)
+            print("Pulling evidence repositories...")
+            for name, result in repos.pull().items():
+                if result.success:
+                    print(f"  {name}: {result.stdout or 'Already up to date.'}")
+                else:
+                    print(
+                        f"WARNING: {name} pull returned non-zero:\n  {result.stderr}",
+                        file=sys.stderr,
+                    )
 
         if not pull_only:
             commit_msg = f"OctoScribe sync {datetime.now().date()}"
-            print("Committing and pushing...")
-            result = repo.commit_and_push(commit_msg)
-            if result.success:
-                print(f"  {result.stdout or 'Nothing to commit.'}")
-            else:
-                print(f"WARNING: push returned non-zero:\n  {result.stderr}", file=sys.stderr)
+            print("Committing audio, then transcript evidence...")
+            for name, result in repos.commit_and_push(commit_msg).items():
+                if result.success:
+                    print(f"  {name}: {result.stdout or 'Nothing to commit.'}")
+                else:
+                    print(
+                        f"WARNING: {name} push returned non-zero:\n  {result.stderr}",
+                        file=sys.stderr,
+                    )
 
     except DataRepoError as exc:
         print(f"ERROR: Repository error: {exc}", file=sys.stderr)
@@ -474,38 +583,46 @@ def cmd_sync(args: argparse.Namespace, config) -> None:
 def cmd_status(args: argparse.Namespace, config) -> None:
     """Show pipeline status."""
     from src.manifest import Manifest
-    from src.repository import DataRepository, DataRepoError
+    from src.repository import DataRepoError, EvidenceRepositories
 
     # Repository status.
     try:
-        repo = DataRepository(config.data_repo)
-        repo_status = repo.status()
+        repo_statuses = EvidenceRepositories(config).status()
     except DataRepoError as exc:
-        repo_status = {
+        fallback = {
             "path": str(config.data_repo.path),
             "branch": config.data_repo.branch,
             "has_remote": bool(config.data_repo.url),
             "uncommitted_changes": False,
         }
+        repo_statuses = {"audio": fallback, "transcripts": fallback}
         log.debug("Could not read repo status: %s", exc)
 
-    remote_display = config.data_repo.url or "(none)"
-    branch_display = repo_status.get("branch") or config.data_repo.branch
-    uncommitted_display = "Yes" if repo_status.get("uncommitted_changes") else "No"
+    audio_status = repo_statuses["audio"]
+    text_status = repo_statuses["transcripts"]
 
     # Manifest stats.
     manifest_path = config.download.manifest_file
     if manifest_path.exists():
         manifest = Manifest(manifest_path)
         stats = manifest.stats()
+        quality_stats = manifest.quality_stats()
         pending_count = len(manifest.pending_transcription())
     else:
         stats = {"total": 0, "downloaded": 0, "transcribed": 0, "failed": 0}
+        quality_stats = {
+            "machine_transcribed": 0,
+            "cross_checked": 0,
+            "needs_review": 0,
+            "human_verified": 0,
+            "legacy_completed": 0,
+        }
         pending_count = 0
 
     # Config display.
     ini_path_display = str(config.ini_path)
-    backend_display = config.transcribe.backend
+    providers = getattr(config.transcribe, "providers", ())
+    backend_display = ",".join(providers) if providers else config.transcribe.backend
     model_display = config.transcribe.model
 
     if config.source.mode == "folder":
@@ -516,9 +633,19 @@ def cmd_status(args: argparse.Namespace, config) -> None:
     print("OctoScribe Status")
     print("=================")
     print(f"Source:        {source_display}")
-    print(f"Data repo:     {repo_status.get('path', config.data_repo.path)} (branch: {branch_display})")
-    print(f"Remote:        {remote_display}")
-    print(f"Uncommitted:   {uncommitted_display}")
+    print(
+        f"Audio repo:    {audio_status.get('path', config.audio_repo.path)} "
+        f"(branch: {audio_status.get('branch') or config.audio_repo.branch})"
+    )
+    print(
+        f"Text repo:     {text_status.get('path', config.text_repo.path)} "
+        f"(branch: {text_status.get('branch') or config.text_repo.branch})"
+    )
+    print(
+        "Uncommitted:   "
+        f"audio={'Yes' if audio_status.get('uncommitted_changes') else 'No'}, "
+        f"text={'Yes' if text_status.get('uncommitted_changes') else 'No'}"
+    )
     print()
     print("Manifest:")
     print(f"  Total entries:    {stats['total']}")
@@ -526,6 +653,10 @@ def cmd_status(args: argparse.Namespace, config) -> None:
     print(f"  Transcribed:      {stats['transcribed']}")
     print(f"  Failed:           {stats['failed']}")
     print(f"  Pending transcription: {pending_count}")
+    print(f"  Machine only:     {quality_stats['machine_transcribed']}")
+    print(f"  Cross-checked:    {quality_stats['cross_checked']}")
+    print(f"  Needs review:     {quality_stats['needs_review']}")
+    print(f"  Human verified:   {quality_stats['human_verified']}")
     print()
     print(f"Config: {ini_path_display}")
     print(f"Backend: {backend_display} ({model_display})")
@@ -565,18 +696,31 @@ def cmd_ci_export(args: argparse.Namespace, config) -> None:
         "TELEGRAM_API_HASH":  config.telegram.api_hash,
         "TELEGRAM_PHONE":     config.telegram.phone,
         "OPENAI_API_KEY":     config.transcribe.api_key or "(not set)",
+        "XAI_API_KEY":        config.transcribe.xai_api_key or "(not set)",
+        "META_ASR_API_KEY":   config.transcribe.meta_asr_api_key or "(not set)",
+        "AUDIO_REPO_URL":     config.audio_repo.url or "(not set)",
+        "TRANSCRIPT_REPO_URL": config.text_repo.url or "(not set)",
+        # Legacy shared-repository name remains visible for existing setups.
         "DATA_REPO_URL":      config.data_repo.url or "(not set)",
         "TELEGRAM_SESSION_B64": session_b64,
     }
 
     # --- Variables (store as repository Variables, not Secrets) --------
     variables = {
-        "SOURCE_MODE":         config.source.mode,
-        "SOURCE_FOLDER":       str(config.source.folder) if config.source.folder else "(not set)",
+        "OCTOSCRIBE_SOURCE_MODE": config.source.mode,
+        "OCTOSCRIBE_SOURCE_FOLDER": str(config.source.folder) if config.source.folder else "(not set)",
         "TELEGRAM_GROUP":      config.telegram.group or "(not set)",
         "TRANSCRIBE_BACKEND":  config.transcribe.backend,
         "TRANSCRIBE_MODEL":    config.transcribe.model,
         "TRANSCRIBE_LANGUAGE": config.transcribe.language,
+        "OCTOSCRIBE_ASR_PROVIDERS": ",".join(config.transcribe.providers),
+        "OCTOSCRIBE_PRIMARY_ASR": config.transcribe.primary_provider,
+        "XAI_STT_URL":         config.transcribe.xai_base_url,
+        "META_ASR_URL":        config.transcribe.meta_asr_url or "(not set)",
+        "META_ASR_MODEL":      config.transcribe.meta_asr_model,
+        "META_ASR_LANGUAGE":   config.transcribe.meta_asr_language,
+        "AUDIO_REPO_BRANCH":   config.audio_repo.branch,
+        "TRANSCRIPT_REPO_BRANCH": config.text_repo.branch,
         "DATA_REPO_BRANCH":    config.data_repo.branch,
     }
 
@@ -673,6 +817,7 @@ def main() -> None:
         config = Config.load(
             ini_path=args.config if args.config else None,
             env_file=args.env if args.env else None,
+            validation_profile=args.command,
             **overrides,
         )
     except SystemExit:

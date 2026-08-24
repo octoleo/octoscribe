@@ -178,6 +178,41 @@ def test_pending_transcription_empty_when_all_transcribed(tmp_path: Path) -> Non
     assert m.pending_transcription() == []
 
 
+@pytest.mark.parametrize(
+    "quality_state",
+    ["machine_transcribed", "cross_checked", "needs_review", "human_verified"],
+)
+def test_quality_states_are_terminal_without_claiming_completed(
+    tmp_path: Path, quality_state: str
+) -> None:
+    m = Manifest(tmp_path / "manifest.json")
+    m.mark_downloaded(1, _sample_metadata(1))
+    m.mark_transcribed(
+        1,
+        {
+            **_sample_transcription_result(),
+            "quality_state": quality_state,
+        },
+    )
+    assert m.is_transcribed(1)
+    assert m.pending_transcription() == []
+    assert m.get_entry(1)["transcription"]["status"] == quality_state
+
+
+def test_human_verification_is_explicit_and_auditable(tmp_path: Path) -> None:
+    m = Manifest(tmp_path / "manifest.json")
+    m.mark_downloaded(1, _sample_metadata(1))
+    m.mark_transcribed(
+        1,
+        {**_sample_transcription_result(), "quality_state": "needs_review"},
+    )
+    m.mark_human_verified(1, reviewer="reviewer@example.org")
+    transcription = m.get_entry(1)["transcription"]
+    assert transcription["status"] == "human_verified"
+    assert transcription["human_verified_by"] == "reviewer@example.org"
+    assert transcription["human_verified_at"].endswith("Z")
+
+
 # ---------------------------------------------------------------------------
 # 10. stats() returns correct counts
 # ---------------------------------------------------------------------------
@@ -399,3 +434,18 @@ def test_save_sorts_keys(tmp_path: Path) -> None:
     data = json.loads(raw_text)
     keys = list(data.keys())
     assert keys == sorted(keys)
+
+
+def test_record_audio_hash_backfills_then_rejects_changed_evidence(
+    tmp_path: Path,
+) -> None:
+    m = Manifest(tmp_path / "manifest.json")
+    metadata = _sample_metadata(1)
+    metadata.pop("hash", None)
+    m.mark_downloaded(1, metadata)
+    expected = "a" * 64
+    m.record_audio_hash(1, expected)
+    assert m.get_entry(1)["hash"] == expected
+
+    with pytest.raises(ValueError, match="source evidence changed"):
+        m.record_audio_hash(1, "b" * 64)

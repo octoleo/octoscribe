@@ -49,6 +49,17 @@ class TestGatherFiles:
         assert names == {"Sermon One.mp3", "Deep Truth.flac"}
         assert "notes.txt" not in names
 
+    def test_does_not_follow_symlinked_audio_outside_source(
+        self, tmp_path: Path
+    ) -> None:
+        source = tmp_path / "source"
+        source.mkdir()
+        outside = tmp_path / "private.mp3"
+        outside.write_bytes(b"PRIVATE")
+        (source / "linked.mp3").symlink_to(outside)
+
+        assert FolderImporter._gather_files(source, recursive=True) == []
+
     def test_recursive_includes_nested(self, sample_audio_folder: Path) -> None:
         files = FolderImporter._gather_files(sample_audio_folder, recursive=True)
         assert any(p.name == "Deep Truth.flac" for p in files)
@@ -227,6 +238,31 @@ class TestFolderImporterErrors:
         # Failure was recorded against the content-hash key.
         entries = tmp_manifest.all_entries()
         assert all(e.get("failed_stage") == "import" for e in entries.values())
+
+    def test_copy_hash_mismatch_is_rejected_and_removed(
+        self, folder_config: Config, tmp_manifest: Manifest
+    ) -> None:
+        """A corrupted copy never becomes immutable source evidence."""
+        from unittest.mock import patch
+
+        from src.audio import sha256_file as real_sha256_file
+
+        def _hash(path: Path) -> str:
+            path = Path(path)
+            if path.parent == folder_config.download.audio_dir:
+                return "0" * 64
+            return real_sha256_file(path)
+
+        with patch("src.folder.sha256_file", side_effect=_hash):
+            stats = FolderImporter(folder_config, tmp_manifest).run()
+
+        assert stats.failed == 2
+        assert stats.imported == 0
+        assert list(folder_config.download.audio_dir.iterdir()) == []
+        assert all(
+            entry.get("failed_stage") == "import"
+            for entry in tmp_manifest.all_entries().values()
+        )
 
 
 # ---------------------------------------------------------------------------
