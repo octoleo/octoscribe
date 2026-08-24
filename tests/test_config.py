@@ -128,10 +128,10 @@ class TestIniLoading:
         assert cfg.download.workers == 16
         # transcribe section untouched → default
         assert cfg.transcribe.backend == "openai"
-        assert cfg.transcribe.retry_attempts == 3
+        assert cfg.transcribe.retry_attempts == 1
         # local_transcribe section untouched → default
         assert cfg.transcribe.local_model == "large-v3"
-        assert cfg.transcribe.vad_filter is True
+        assert cfg.transcribe.vad_filter is False
 
 
 # ---------------------------------------------------------------------------
@@ -172,6 +172,162 @@ class TestEnvVarLoading:
         monkeypatch.delenv("DATA_REPO_URL", raising=False)
         cfg = Config.load(ini_path=tmp_path / "none.ini")
         assert cfg.data_repo.url is None
+
+    def test_provider_auto_discovery_uses_only_configured_audio_services(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        for key, value in _REQUIRED_ENV.items():
+            monkeypatch.setenv(key, value)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.setenv("XAI_API_KEY", "xai-test")
+        monkeypatch.delenv("META_ASR_URL", raising=False)
+
+        cfg = Config.load(
+            ini_path=tmp_path / "none.ini", env_file=tmp_path / "none.env"
+        )
+
+        assert cfg.transcribe.providers == ("xai",)
+        assert cfg.transcribe.primary_provider == "xai"
+
+    def test_provider_auto_discovery_orders_openai_xai_then_meta(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _minimal_env(
+            monkeypatch,
+            extra={
+                "XAI_API_KEY": "xai-test",
+                "META_ASR_URL": "http://localhost:8080",
+            },
+        )
+        cfg = Config.load(ini_path=tmp_path / "none.ini")
+        assert cfg.transcribe.providers == ("openai", "xai", "meta")
+        assert cfg.transcribe.meta_asr_language == "eng_Latn"
+        assert cfg.transcribe.model == "gpt-transcribe"
+
+    def test_plain_api_key_override_cannot_cross_provider_boundaries(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _minimal_env(
+            monkeypatch,
+            extra={
+                "XAI_API_KEY": "xai-only",
+                "META_ASR_URL": "http://localhost:8080",
+                "META_ASR_API_KEY": "meta-only",
+            },
+        )
+
+        cfg = Config.load(
+            ini_path=tmp_path / "none.ini",
+            api_key="ambiguous-must-be-ignored",
+        )
+
+        assert cfg.transcribe.api_key == "sk-test-openaikey"
+        assert cfg.transcribe.xai_api_key == "xai-only"
+        assert cfg.transcribe.meta_asr_api_key == "meta-only"
+
+    def test_section_qualified_provider_secret_overrides_are_isolated(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _minimal_env(monkeypatch)
+        cfg = Config.load(
+            ini_path=tmp_path / "none.ini",
+            transcribe__api_key="openai-override",
+            xai__api_key="xai-override",
+        )
+        assert cfg.transcribe.api_key == "openai-override"
+        assert cfg.transcribe.xai_api_key == "xai-override"
+
+    def test_new_repository_environment_splits_audio_and_transcripts(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _minimal_env(
+            monkeypatch,
+            extra={
+                "AUDIO_REPO_PATH": str(tmp_path / "audio-repo"),
+                "TRANSCRIPT_REPO_PATH": str(tmp_path / "text-repo"),
+            },
+        )
+        cfg = Config.load(ini_path=tmp_path / "none.ini")
+        assert cfg.audio_repo.path == (tmp_path / "audio-repo").resolve()
+        assert cfg.text_repo.path == (tmp_path / "text-repo").resolve()
+        assert cfg.download.audio_dir.parent == cfg.audio_repo.path
+        assert cfg.transcribe.transcriptions_dir.parent == cfg.text_repo.path
+        assert cfg.download.manifest_file.parent == cfg.text_repo.path
+
+    def test_default_session_directory_is_outside_evidence_repositories(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _minimal_env(monkeypatch)
+        cfg = Config.load(ini_path=tmp_path / "none.ini")
+        assert not cfg.telegram.session_dir.is_relative_to(cfg.audio_repo.path)
+        assert not cfg.telegram.session_dir.is_relative_to(cfg.text_repo.path)
+
+
+class TestCommandValidationProfiles:
+    @staticmethod
+    def _clear_credentials(monkeypatch: pytest.MonkeyPatch) -> None:
+        for name in (
+            "TELEGRAM_API_ID",
+            "TELEGRAM_API_HASH",
+            "TELEGRAM_PHONE",
+            "OPENAI_API_KEY",
+            "XAI_API_KEY",
+            "META_ASR_URL",
+        ):
+            monkeypatch.delenv(name, raising=False)
+
+    def test_folder_download_requires_neither_telegram_nor_asr(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._clear_credentials(monkeypatch)
+        source = tmp_path / "incoming"
+        source.mkdir()
+        ini = _write_ini(
+            tmp_path,
+            f"[source]\nmode = folder\nfolder = {source}\n",
+        )
+        cfg = Config.load(ini_path=ini, validation_profile="download")
+        assert cfg.source.mode == "folder"
+        assert cfg.transcribe.providers == ()
+
+    def test_telegram_download_does_not_require_asr_key(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._clear_credentials(monkeypatch)
+        for key, value in _REQUIRED_ENV.items():
+            monkeypatch.setenv(key, value)
+        cfg = Config.load(
+            ini_path=tmp_path / "none.ini",
+            validation_profile="download",
+        )
+        assert cfg.source.mode == "telegram"
+        assert cfg.transcribe.providers == ()
+
+    def test_transcribe_does_not_require_telegram_credentials(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._clear_credentials(monkeypatch)
+        monkeypatch.setenv("OPENAI_API_KEY", "openai-only")
+        cfg = Config.load(
+            ini_path=tmp_path / "none.ini",
+            validation_profile="transcribe",
+        )
+        assert cfg.transcribe.providers == ("openai",)
+        assert cfg.telegram.api_id is None
+
+    @pytest.mark.parametrize("profile", ["sync", "status", "session", "ci-export"])
+    def test_non_processing_commands_require_no_service_credentials(
+        self,
+        profile: str,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._clear_credentials(monkeypatch)
+        cfg = Config.load(
+            ini_path=tmp_path / "none.ini",
+            validation_profile=profile,
+        )
+        assert cfg.transcribe.providers == ()
 
 
 # ---------------------------------------------------------------------------
@@ -406,6 +562,23 @@ class TestInvalidBackend:
         captured = capsys.readouterr()
         assert "backend" in captured.err.lower()
 
+    def test_openai_diarization_model_is_rejected(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        _minimal_env(monkeypatch)
+        ini = _write_ini(
+            tmp_path,
+            "[transcribe]\nmodel = gpt-4o-transcribe-diarize\n",
+        )
+
+        with pytest.raises(SystemExit):
+            Config.load(ini_path=ini)
+
+        assert "diarization models are not supported" in capsys.readouterr().err
+
 
 # ---------------------------------------------------------------------------
 # 8. OpenAI backend without API key → SystemExit
@@ -522,6 +695,70 @@ class TestDataRepoPath:
             )
         except ValueError:
             pass  # Good – it is outside.
+
+
+class TestEvidencePathContainment:
+    def test_rejects_nested_split_repositories(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _minimal_env(monkeypatch)
+        with pytest.raises(SystemExit):
+            Config.load(
+                ini_path=tmp_path / "none.ini",
+                audio_repo__path=tmp_path / "evidence",
+                transcript_repo__path=tmp_path / "evidence" / "text",
+            )
+
+    @pytest.mark.parametrize(
+        "override",
+        [
+            "paths__audio_dir",
+            "paths__manifest_file",
+            "paths__transcriptions_dir",
+            "paths__artifacts_dir",
+            "paths__reports_dir",
+        ],
+    )
+    def test_rejects_evidence_paths_outside_owning_repository(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        override: str,
+    ) -> None:
+        _minimal_env(monkeypatch)
+        with pytest.raises(SystemExit):
+            Config.load(
+                ini_path=tmp_path / "none.ini",
+                audio_repo__path=tmp_path / "audio-repo",
+                transcript_repo__path=tmp_path / "text-repo",
+                **{override: tmp_path / "outside"},
+            )
+
+
+class TestSecuritySensitiveValidation:
+    def test_rejects_unsafe_repository_branch_name(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _minimal_env(monkeypatch)
+        with pytest.raises(SystemExit):
+            Config.load(
+                ini_path=tmp_path / "none.ini",
+                audio_repo__branch="../unexpected",
+            )
+
+    def test_meta_provider_requires_language_identifier(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _minimal_env(
+            monkeypatch,
+            extra={"META_ASR_URL": "http://127.0.0.1:9000"},
+        )
+        with pytest.raises(SystemExit):
+            Config.load(
+                ini_path=tmp_path / "none.ini",
+                transcribe__providers="openai,meta",
+                meta_asr__language="",
+            )
 
     def test_custom_data_repo_path_respected(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

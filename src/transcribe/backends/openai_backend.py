@@ -1,7 +1,7 @@
 """
 src/transcribe/backends/openai_backend.py — OpenAI transcription backend.
 
-Wraps the OpenAI audio transcription API (``gpt-4o-transcribe`` or ``whisper-1``)
+Wraps the OpenAI audio transcription API (recommended: ``gpt-transcribe``)
 and always sends the :data:`~src.transcribe.prompt.VERBATIM_PROMPT`.  All retry
 and error-classification concerns are delegated to
 :class:`~src.transcribe.backends.retry.RetryPolicy`, leaving this class with a
@@ -31,10 +31,21 @@ class OpenAIBackend(TranscriptionBackend):
     """
 
     def __init__(self, config: TranscribeConfig) -> None:
+        if str(config.model).casefold().startswith("gpt-4o-transcribe-diarize"):
+            raise ValueError(
+                "OpenAI diarization models are not supported by OctoScribe's "
+                "verbatim chunk pipeline; select gpt-transcribe instead"
+            )
         import openai
 
         self._config = config
-        self._client = openai.OpenAI(api_key=config.api_key)
+        self._client = openai.OpenAI(
+            api_key=config.api_key,
+            timeout=float(getattr(config, "provider_timeout_seconds", 900.0)),
+            # RetryPolicy below is the single, auditable owner of retries.
+            # Leaving SDK retries enabled would silently multiply paid uploads.
+            max_retries=0,
+        )
         # Resilience is the policy's responsibility, not ours.
         self._retry = RetryPolicy(
             attempts=config.retry_attempts,
@@ -55,17 +66,52 @@ class OpenAIBackend(TranscriptionBackend):
         transcript directly.
         """
         cfg = self._config
+        path = Path(audio_path)
+        if not path.is_file():
+            raise FileNotFoundError(f"Audio file does not exist: {path}")
+        if path.stat().st_size <= 0:
+            raise ValueError(f"Audio file is empty: {path}")
+        if path.stat().st_size > 25 * 1024 * 1024:
+            raise ValueError(
+                "OpenAI transcription files must be 25 MB or smaller; "
+                "run the OctoScribe chunking pipeline for long recordings"
+            )
 
         def _attempt() -> str:
-            with open(audio_path, "rb") as audio_file:
-                result = self._client.audio.transcriptions.create(
-                    file=audio_file,
-                    model=cfg.model,
-                    language=cfg.language,
-                    prompt=VERBATIM_PROMPT,
-                    response_format="text",
-                )
-            # response_format="text" returns a plain string directly.
-            return str(result)
+            with open(path, "rb") as audio_file:
+                request: dict[str, object] = {
+                    "file": audio_file,
+                    "model": cfg.model,
+                    "prompt": VERBATIM_PROMPT,
+                }
+                if cfg.model == "gpt-transcribe":
+                    # The current API accepts a ranked language list.  Do not
+                    # request text response format: the SDK returns an object
+                    # whose .text field is the exact provider transcript.
+                    if cfg.language:
+                        # languages is a current API field that the Python SDK
+                        # accepts through its forward-compatible extra body.
+                        request["extra_body"] = {"languages": [cfg.language]}
+                elif cfg.model == "whisper-1":
+                    # whisper-1 supports the plain-text response format.
+                    request["language"] = cfg.language
+                    request["response_format"] = "text"
+                else:
+                    # gpt-4o transcription models support JSON, not the
+                    # whisper-1-only text response format.  Leaving the format
+                    # unset selects the API's JSON default, which the parser
+                    # below handles without altering its text field.
+                    request["language"] = cfg.language
+                result = self._client.audio.transcriptions.create(**request)
 
-        return self._retry.run(_attempt, label=audio_path.name)
+            if isinstance(result, str):
+                transcript = result
+            elif isinstance(result, dict):
+                transcript = result.get("text")
+            else:
+                transcript = getattr(result, "text", None)
+            if not isinstance(transcript, str) or not transcript.strip():
+                raise RuntimeError("OpenAI returned an empty or malformed transcript")
+            return transcript
+
+        return self._retry.run(_attempt, label=path.name)

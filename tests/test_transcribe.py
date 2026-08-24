@@ -39,7 +39,7 @@ def _make_transcribe_config(tmp_path: Path, **overrides):
     """Build a minimal TranscribeConfig-like namespace for tests."""
     defaults = dict(
         backend="openai",
-        model="gpt-4o-transcribe",
+        model="gpt-transcribe",
         language="en",
         workers=1,
         retry_attempts=2,
@@ -134,6 +134,26 @@ def test_openai_backend_name(tmp_path: Path):
     assert backend.name == "openai"
 
 
+def test_openai_backend_configures_provider_timeout(tmp_path: Path):
+    cfg = _make_transcribe_config(tmp_path, provider_timeout_seconds=42)
+    mock_openai = MagicMock()
+    with patch.dict(sys.modules, {"openai": mock_openai}):
+        OpenAIBackend(cfg)
+    mock_openai.OpenAI.assert_called_once_with(
+        api_key="sk-test", timeout=42.0, max_retries=0
+    )
+
+
+def test_openai_backend_rejects_diarization_model(tmp_path: Path):
+    cfg = _make_transcribe_config(
+        tmp_path,
+        model="gpt-4o-transcribe-diarize",
+    )
+
+    with pytest.raises(ValueError, match="diarization models are not supported"):
+        _make_openai_backend(cfg)
+
+
 # ---------------------------------------------------------------------------
 # 3. LocalWhisperBackend.name returns "local"
 # ---------------------------------------------------------------------------
@@ -191,7 +211,9 @@ def test_openai_backend_transcribe_calls_api(tmp_path: Path):
     audio_file = _make_audio_file(tmp_path)
 
     mock_client = MagicMock()
-    mock_client.audio.transcriptions.create.return_value = "Hello world."
+    mock_client.audio.transcriptions.create.return_value = SimpleNamespace(
+        text="Hello world."
+    )
 
     backend = _make_openai_backend(cfg, mock_client)
     result = backend.transcribe(audio_file)
@@ -202,7 +224,41 @@ def test_openai_backend_transcribe_calls_api(tmp_path: Path):
     assert kwargs["model"] == "gpt-4o-transcribe"
     assert kwargs["language"] == "af"
     assert kwargs["prompt"] == VERBATIM_PROMPT
+    assert "response_format" not in kwargs
+
+
+def test_openai_backend_whisper_uses_supported_text_format(tmp_path: Path):
+    cfg = _make_transcribe_config(tmp_path, model="whisper-1", language="en")
+    audio_file = _make_audio_file(tmp_path)
+    mock_client = MagicMock()
+    mock_client.audio.transcriptions.create.return_value = "Legacy transcript."
+
+    result = _make_openai_backend(cfg, mock_client).transcribe(audio_file)
+
+    assert result == "Legacy transcript."
+    kwargs = mock_client.audio.transcriptions.create.call_args.kwargs
+    assert kwargs["model"] == "whisper-1"
+    assert kwargs["language"] == "en"
     assert kwargs["response_format"] == "text"
+
+
+def test_openai_backend_uses_current_gpt_transcribe_contract(tmp_path: Path):
+    cfg = _make_transcribe_config(tmp_path, model="gpt-transcribe", language="en")
+    audio_file = _make_audio_file(tmp_path)
+    mock_client = MagicMock()
+    mock_client.audio.transcriptions.create.return_value = SimpleNamespace(
+        text="Exact current transcript."
+    )
+
+    result = _make_openai_backend(cfg, mock_client).transcribe(audio_file)
+
+    assert result == "Exact current transcript."
+    kwargs = mock_client.audio.transcriptions.create.call_args.kwargs
+    assert kwargs["model"] == "gpt-transcribe"
+    assert kwargs["extra_body"] == {"languages": ["en"]}
+    assert kwargs["prompt"] == VERBATIM_PROMPT
+    assert "language" not in kwargs
+    assert "response_format" not in kwargs
 
 
 # ---------------------------------------------------------------------------
@@ -347,7 +403,13 @@ def test_transcriber_run_marks_transcribed_on_success(tmp_path: Path):
 
     manifest.mark_transcribed.assert_called_once_with(
         "42",
-        {"output_file": "sermon.txt", "model": "openai"},
+        {
+            "output_file": "sermon.txt",
+            "model": "openai",
+            "transcript_sha256": __import__("hashlib").sha256(
+                b"Thus says the Lord."
+            ).hexdigest(),
+        },
     )
     assert stats.succeeded == 1
     assert stats.failed == 0

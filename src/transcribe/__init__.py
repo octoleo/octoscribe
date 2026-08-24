@@ -7,6 +7,8 @@ responsibility:
 * :mod:`src.transcribe.prompt`            — the verbatim instruction string.
 * :mod:`src.transcribe.normalize`         — whitespace-only text normalisation.
 * :mod:`src.transcribe.results`           — result/statistics value objects.
+* :mod:`src.transcribe.chunking`          — deterministic chunk/seam policy.
+* :mod:`src.transcribe.audio_chunks`      — ffmpeg extraction and hashing.
 * :mod:`src.transcribe.backends`          — the Strategy interface + backends:
     * :mod:`~src.transcribe.backends.base`          — the interface.
     * :mod:`~src.transcribe.backends.retry`         — retry policy + classifier.
@@ -28,9 +30,31 @@ Everything previously importable from ``src/transcribe.py`` is re-exported here
 
 from __future__ import annotations
 
+from src.transcribe.audio_chunks import (
+    AudioToolError,
+    FFmpegAudioTools,
+    MaterializedChunk,
+)
 from src.transcribe.backends.base import TranscriptionBackend
 from src.transcribe.backends.local_whisper import LocalWhisperBackend
+from src.transcribe.backends.meta_backend import MetaASRBackend
 from src.transcribe.backends.openai_backend import OpenAIBackend
+from src.transcribe.backends.registry import (
+    CANONICAL_PROVIDERS,
+    build_backend_registry,
+    create_backend_registry,
+    provider_model_name,
+)
+from src.transcribe.backends.xai_backend import XAIBackend
+from src.transcribe.chunking import (
+    ChunkMetadata,
+    OverlapAlignment,
+    StitchResult,
+    find_overlap_alignment,
+    plan_chunks,
+    stitch_transcripts,
+    stitch_with_alignment,
+)
 from src.transcribe.normalize import _normalize_text, normalize_text
 from src.transcribe.prompt import VERBATIM_PROMPT
 from src.transcribe.results import BatchStats, TranscriptionResult
@@ -40,7 +64,23 @@ __all__ = [
     "VERBATIM_PROMPT",
     "TranscriptionBackend",
     "OpenAIBackend",
+    "XAIBackend",
+    "MetaASRBackend",
     "LocalWhisperBackend",
+    "CANONICAL_PROVIDERS",
+    "build_backend_registry",
+    "create_backend_registry",
+    "provider_model_name",
+    "AudioToolError",
+    "FFmpegAudioTools",
+    "MaterializedChunk",
+    "ChunkMetadata",
+    "OverlapAlignment",
+    "StitchResult",
+    "find_overlap_alignment",
+    "plan_chunks",
+    "stitch_transcripts",
+    "stitch_with_alignment",
     "BatchStats",
     "TranscriptionResult",
     "Transcriber",
