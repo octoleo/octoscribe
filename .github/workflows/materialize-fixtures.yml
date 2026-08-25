@@ -1,0 +1,68 @@
+name: Materialize Telegram OGG fixture
+
+on:
+  push:
+    branches:
+      - feature/verbatim-ensemble-transcription
+
+permissions:
+  contents: write
+
+concurrency:
+  group: octoscribe-materialize-fixtures
+  cancel-in-progress: false
+
+jobs:
+  materialize:
+    if: ${{ hashFiles('tests/fixtures/telegram/.parts/john-*.bin') != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out fixture branch
+        uses: actions/checkout@v4
+        with:
+          ref: feature/verbatim-ensemble-transcription
+          fetch-depth: 0
+
+      - name: Materialize and verify fixtures
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          parts=(
+            'tests/fixtures/telegram/.parts/john-00.bin'
+            'tests/fixtures/telegram/.parts/john-01.bin'
+            'tests/fixtures/telegram/.parts/john-02.bin'
+            'tests/fixtures/telegram/.parts/john-03.bin'
+          )
+          output='tests/fixtures/telegram/audio/1 John 17-8.ogg'
+          tmp="${output}.tmp"
+
+          mkdir -p "$(dirname "${output}")"
+          : > "${tmp}"
+          for part in "${parts[@]}"; do
+            cat "${part}" >> "${tmp}"
+          done
+
+          test "$(wc -c < "${tmp}")" -eq 9910401
+          printf '%s  %s\n' \
+            '698056c50804e1033b1c68adcbf7d4064c32f112aaa6aba23f0fbe524472849a' \
+            "${tmp}" | sha256sum -c -
+          mv "${tmp}" "${output}"
+
+          printf '%s  %s\n' \
+            '7b2bc9c89b96cc528cd3f63a88e63710e2128516dae1079f4fabf8414cd8b060' \
+            'tests/fixtures/telegram/audio/1 Timothy 15-6.ogg' | sha256sum -c -
+
+          rm -rf 'tests/fixtures/telegram/.parts'
+          rm '.github/workflows/materialize-fixtures.yml'
+
+      - name: Commit the verified OGG fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add --all
+          git commit -m 'test: materialize real Telegram OGG fixture'
+          git push origin HEAD:feature/verbatim-ensemble-transcription
