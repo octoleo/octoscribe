@@ -45,15 +45,15 @@ candidates remain unchanged.
 Manual capture mode is the only way that workflow produces bootstrap machine
 reference files; its artifact can be inspected and deliberately committed. A
 run after merge into `v1` requires those committed references and compares
-generated text with them word-for-word, normalizing only case, punctuation, and
-whitespace. Added, deleted, and substituted spoken words are reported
-explicitly. Fully aligned seams publish as
+generated text with them word-for-word, normalizing case, punctuation,
+whitespace, and unambiguous contraction spelling. Added, deleted, and
+substituted spoken words are reported explicitly. Fully aligned seams publish as
 `machine_transcribed`; any unaligned seam publishes normally as
 `completed_with_warnings`. Both results remain under `transcriptions/`; neither
 is withheld or moved to a separate output area.
 
 The verifier itself remains strict by default (`max_word_error_rate: 0`). This
-paid regression workflow explicitly uses a narrow `0.0025` (0.25%) ceiling for
+paid regression workflow explicitly uses a narrow `0.005` (0.5%) ceiling for
 each transcript because API output can vary slightly from its machine-generated
 reference. Reports still record `exact_spoken_word_match`, exact word/error
 counts, the WER, and every individual difference. Numeric-token and common

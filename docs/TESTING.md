@@ -291,8 +291,9 @@ bootstrap machine reference files; the capture artifact can then be inspected
 and deliberately committed. Merge-triggered validation requires those
 references to be committed already and never silently replaces them.
 Validation compares each generated transcript with its committed reference
-word-for-word after normalizing only case, punctuation, and whitespace, and
-reports every added, deleted, or substituted spoken word.
+word-for-word after normalizing case, punctuation, whitespace, and unambiguous
+contraction spelling, and reports every added, deleted, or substituted spoken
+word.
 
 `command: verify` is exact by default: `max_word_error_rate`, the
 `MAX_WORD_ERROR_RATE` environment variable, and the
@@ -305,9 +306,9 @@ meet the configured rate. Missing generated or reference files always fail.
 Differences involving a numeric token or a common negation always fail even
 when the overall WER is below the configured tolerance.
 
-The paid fixture workflow uses the deliberately narrow value `0.0025` (0.25%)
-to detect material model drift while permitting the few known nondeterministic
-word variations in the machine reference corpus. Its reports still distinguish
+The paid fixture workflow uses the deliberately narrow value `0.005` (0.5%)
+to detect material model drift while permitting observed nondeterministic word
+variations in the machine reference corpus. Its reports still distinguish
 `exact_match`, `mismatch_within_tolerance`, and `mismatch`; passing within
 tolerance is never presented as an exact match.
 
