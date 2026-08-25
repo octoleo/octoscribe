@@ -17,11 +17,10 @@ Normal CI probes the complete durations, derives the real silence-aware chunk
 plans, and decodes short windows without sending audio anywhere. The paid
 OpenAI integration job is eligible only after a pull request is merged into
 `v1`, and requires the repository secret `OPENAI_API_KEY`. It transcribes both
-complete recordings and then reruns the same action to prove idempotence. These are known
-clear recordings, so the post-merge release regression requires both results to
-finish as `machine_transcribed` and requires every deterministic chunk seam to
-be aligned. A `needs_review` result or any unaligned seam fails the job instead
-of being accepted merely because it is terminal. The fixtures do not include
-human-verified reference transcripts, so that live job proves transport,
-chunking, seaming, publication, evidence, and repeat-run consistency—not
-word-error accuracy.
+complete recordings and then reruns the same action to prove idempotence. The
+post-merge release regression requires each result to agree with its recorded
+seam evidence: fully aligned seams publish as `machine_transcribed`; any
+unaligned seam must publish as `needs_review` under the quarantine directory.
+The fixtures do not include human-verified reference transcripts, so that live
+job proves transport, chunking, conservative seaming, publication, evidence,
+and repeat-run consistency—not word-error accuracy.

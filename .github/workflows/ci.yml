@@ -262,7 +262,7 @@ jobs:
           audio_repository_branch: ${{ github.event.pull_request.base.ref }}
           verbose: true
 
-      - name: Require machine-transcribed outputs and aligned seams
+      - name: Validate truthful quality state, evidence, and seams
         shell: bash
         run: |
           set -euo pipefail

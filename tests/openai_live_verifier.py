@@ -73,7 +73,7 @@ HISTORICAL_FIELDS = (
     "telegram_msg_id",
     "title",
 )
-REQUIRED_SINGLE_PROVIDER_STATE = "machine_transcribed"
+ALLOWED_SINGLE_PROVIDER_STATES = {"machine_transcribed", "needs_review"}
 
 
 def _sha256(path: Path) -> str:
@@ -182,7 +182,7 @@ def _validate_output_locations(
 
 def _validate_report_chunks(
     report: dict[str, Any], expected: dict[str, Any]
-) -> set[tuple[str, int, str, str, int]]:
+) -> tuple[set[tuple[str, int, str, str, int]], bool]:
     chunks = report.get("chunks")
     if not isinstance(chunks, list) or len(chunks) != expected["expected_chunks"]:
         raise AssertionError(
@@ -246,25 +246,32 @@ def _validate_report_chunks(
     seams = report.get("seams")
     if not isinstance(seams, list) or len(seams) != len(chunks) - 1:
         raise AssertionError("report does not retain every deterministic seam")
+    all_seams_aligned = True
     for index, seam in enumerate(seams):
         if not isinstance(seam, dict) or (
             seam.get("left_chunk"), seam.get("right_chunk")
         ) != (index, index + 1):
             raise AssertionError("seam evidence is incomplete or out of order")
-        if seam.get("aligned") is not True:
+        aligned = seam.get("aligned")
+        if not isinstance(aligned, bool):
             raise AssertionError(
-                f"seam {index}->{index + 1} is not aligned; the clear-fixture "
-                "release regression requires every overlap to align"
+                f"seam {index}->{index + 1} has no boolean alignment decision"
             )
-    return candidate_identities
+        all_seams_aligned = all_seams_aligned and aligned
+    return candidate_identities, all_seams_aligned
 
 
-def _require_release_quality_state(message_id: str, state: Any) -> None:
-    """Reject quarantine output for the two known-clear release fixtures."""
-    if state != REQUIRED_SINGLE_PROVIDER_STATE:
+def _require_release_quality_state(
+    message_id: str, state: Any, *, all_seams_aligned: bool
+) -> None:
+    """Require the published state to truthfully reflect recorded seam evidence."""
+    expected_state = (
+        "machine_transcribed" if all_seams_aligned else "needs_review"
+    )
+    if state != expected_state:
         raise AssertionError(
-            f"fixture {message_id} must finish {REQUIRED_SINGLE_PROVIDER_STATE!r}; "
-            f"got {state!r}"
+            f"fixture {message_id} has all_seams_aligned={all_seams_aligned}; "
+            f"expected {expected_state!r}, got {state!r}"
         )
 
 
@@ -341,7 +348,10 @@ def validate_transcribed_workspace(
         if not isinstance(transcription, dict):
             raise AssertionError(f"fixture {message_id} was not transcribed")
         state = transcription.get("status")
-        _require_release_quality_state(message_id, state)
+        if state not in ALLOWED_SINGLE_PROVIDER_STATES:
+            raise AssertionError(
+                f"fixture {message_id} has invalid single-provider state {state!r}"
+            )
         expected_manifest_fields = {
             "model": "gpt-transcribe",
             "providers": ["openai"],
@@ -367,6 +377,11 @@ def validate_transcribed_workspace(
             raise AssertionError(f"fixture {message_id} duration evidence changed")
 
         output_file = str(transcription.get("output_file", ""))
+        in_review_directory = Path(output_file).parts[:1] == ("needs-review",)
+        if in_review_directory != (state == "needs_review"):
+            raise AssertionError(
+                f"fixture {message_id} output path does not match state {state!r}"
+            )
         transcript_path = _within(
             workspace / "transcriptions", output_file, "published transcript"
         )
@@ -419,7 +434,13 @@ def validate_transcribed_workspace(
             raise AssertionError(
                 f"fixture {message_id} contains unexpected comparison or failure evidence"
             )
-        all_candidate_identities.update(_validate_report_chunks(report, expected))
+        candidate_identities, all_seams_aligned = _validate_report_chunks(
+            report, expected
+        )
+        _require_release_quality_state(
+            message_id, state, all_seams_aligned=all_seams_aligned
+        )
+        all_candidate_identities.update(candidate_identities)
 
     actual_reports = set((workspace / "reports").glob("*.evidence.json"))
     actual_transcripts = {

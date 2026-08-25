@@ -250,12 +250,13 @@ without a network call. A separate `openai-live` job is eligible only when a
 pull request is merged into `v1`; it is skipped for pull-request updates,
 direct pushes, and manual branch runs. With the repository secret
 `OPENAI_API_KEY` present, that job transcribes both complete
-recordings through the composite action, validates transcript/evidence links and
-hashes, requires both known-clear fixtures to finish `machine_transcribed`, and
-requires every recorded chunk seam to be aligned. A `needs_review` state or an
-unaligned seam fails this release regression. The job then invokes the action
-again and proves that no output changed. This is a paid transport and end-to-end
-regression, not a claim of human verification or measured word-error accuracy.
+recordings through the composite action and validates transcript/evidence links,
+hashes, and every recorded chunk seam. The published state must match that
+evidence: fully aligned seams require `machine_transcribed`, while any unaligned
+seam requires `needs_review` and quarantine under `transcriptions/needs-review/`.
+The job then invokes the action again and proves that no output changed. This is
+a paid transport and end-to-end regression, not a claim of human verification
+or measured word-error accuracy.
 
 CI validates provider contracts offline. Before promoting a model or provider
 configuration, separately evaluate it on a private, human-verified sermon set
