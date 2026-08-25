@@ -1,9 +1,10 @@
 """Word-for-word comparison of generated transcripts and references.
 
 The comparison deliberately ignores presentation differences only: Unicode
-case, punctuation, and whitespace.  It never rewrites a generated transcript.
-Every spoken-word addition, deletion, and substitution is retained in a JSON
-report and can also be rendered to the command's standard output.
+case, punctuation, whitespace, and unambiguous contraction spelling.  It never
+rewrites a generated transcript.  Every spoken-word addition, deletion, and
+substitution is retained in a JSON report and can also be rendered to the
+command's standard output.
 """
 
 from __future__ import annotations
@@ -20,6 +21,56 @@ from typing import Any, Iterable
 
 SCHEMA_VERSION = 1
 _APOSTROPHES = frozenset({"'", "’", "ʼ", "＇"})
+_UNAMBIGUOUS_CONTRACTIONS: dict[str, tuple[str, ...]] = {
+    "i'm": ("i", "am"),
+    "you're": ("you", "are"),
+    "we're": ("we", "are"),
+    "they're": ("they", "are"),
+    "i've": ("i", "have"),
+    "you've": ("you", "have"),
+    "we've": ("we", "have"),
+    "they've": ("they", "have"),
+    "i'll": ("i", "will"),
+    "you'll": ("you", "will"),
+    "he'll": ("he", "will"),
+    "she'll": ("she", "will"),
+    "it'll": ("it", "will"),
+    "we'll": ("we", "will"),
+    "they'll": ("they", "will"),
+    "aren't": ("are", "not"),
+    "can't": ("can", "not"),
+    "couldn't": ("could", "not"),
+    "didn't": ("did", "not"),
+    "doesn't": ("does", "not"),
+    "don't": ("do", "not"),
+    "hadn't": ("had", "not"),
+    "hasn't": ("has", "not"),
+    "haven't": ("have", "not"),
+    "isn't": ("is", "not"),
+    "mightn't": ("might", "not"),
+    "mustn't": ("must", "not"),
+    "needn't": ("need", "not"),
+    "shan't": ("shall", "not"),
+    "shouldn't": ("should", "not"),
+    "wasn't": ("was", "not"),
+    "weren't": ("were", "not"),
+    "won't": ("will", "not"),
+    "wouldn't": ("would", "not"),
+    "could've": ("could", "have"),
+    "might've": ("might", "have"),
+    "must've": ("must", "have"),
+    "should've": ("should", "have"),
+    "would've": ("would", "have"),
+}
+# ASR punctuation can be inconsistent.  Accept an apostrophe-free spelling
+# only when it cannot collide with a common English word (for example,
+# ``youre`` is safe, while ``were`` could mean either "we're" or "were").
+_UNMARKED_UNAMBIGUOUS_CONTRACTIONS: dict[str, tuple[str, ...]] = {
+    contraction.replace("'", ""): expansion
+    for contraction, expansion in _UNAMBIGUOUS_CONTRACTIONS.items()
+    if contraction.replace("'", "")
+    not in {"cant", "hell", "ill", "shell", "were", "well", "wont"}
+}
 _PROTECTED_NEGATIONS = frozenset(
     {
         "no",
@@ -42,6 +93,15 @@ _PROTECTED_NEGATIONS = frozenset(
         "wouldnt",
         "shouldnt",
         "couldnt",
+        "arent",
+        "hadnt",
+        "hasnt",
+        "havent",
+        "mightnt",
+        "mustnt",
+        "neednt",
+        "shant",
+        "aint",
     }
 )
 
@@ -73,9 +133,11 @@ def _is_word_character(character: str) -> bool:
 def spoken_words(text: str) -> tuple[str, ...]:
     """Return case-folded spoken words with punctuation/whitespace ignored.
 
-    Apostrophes inside a word are removed, so ``don't`` and ``dont`` compare
-    equally.  Other punctuation acts as a word boundary, preventing adjacent
-    words from being silently joined.
+    Unambiguous contractions are expanded, so ``you're`` and ``you are``
+    compare equally.  Ambiguous contractions such as ``he's`` are deliberately
+    left as one word.  Apostrophes in all remaining words are ignored.  Other
+    punctuation acts as a word boundary, preventing adjacent words from being
+    silently joined.
     """
     normalized = unicodedata.normalize("NFKC", text).casefold()
     characters: list[str] = []
@@ -89,9 +151,24 @@ def spoken_words(text: str) -> tuple[str, ...]:
             and _is_word_character(normalized[index + 1])
         )
         if character in _APOSTROPHES and previous_is_word and next_is_word:
+            # Preserve an internal apostrophe until contraction expansion has
+            # had a chance to distinguish ``we're`` from the ordinary word
+            # ``were``.  Remaining apostrophes are removed below.
+            characters.append("'")
             continue
         characters.append(" ")
-    return tuple("".join(characters).split())
+
+    words: list[str] = []
+    for token in "".join(characters).split():
+        expansion = _UNAMBIGUOUS_CONTRACTIONS.get(token)
+        collapsed = token.replace("'", "")
+        if expansion is None:
+            expansion = _UNMARKED_UNAMBIGUOUS_CONTRACTIONS.get(collapsed)
+        if expansion is not None:
+            words.extend(expansion)
+        else:
+            words.append(collapsed)
+    return tuple(words)
 
 
 def _difference(
@@ -284,6 +361,7 @@ def _base_report(relative: Path, status: str) -> dict[str, Any]:
             "case": "casefolded",
             "punctuation": "ignored",
             "whitespace": "ignored",
+            "unambiguous_contractions": "expanded",
         },
     }
 

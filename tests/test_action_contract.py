@@ -34,6 +34,23 @@ def _input_stanza(name: str) -> str:
     return remainder[: next_input.start()] if next_input else remainder
 
 
+def _action_steps() -> list[dict]:
+    document = yaml.safe_load(ACTION)
+    steps = document["runs"]["steps"]
+    assert isinstance(steps, list)
+    return steps
+
+
+def _step_with_script(marker: str) -> dict:
+    matches = [
+        step
+        for step in _action_steps()
+        if marker in str(step.get("run", ""))
+    ]
+    assert len(matches) == 1, f"expected one action step containing {marker!r}"
+    return matches[0]
+
+
 def test_action_path_layout_is_explicit_and_unambiguous() -> None:
     for name in (
         "audio_path",
@@ -89,6 +106,50 @@ def test_action_exposes_complete_provider_and_provenance_controls() -> None:
     assert "TRANSCRIBE_LANGUAGE: ${{ inputs.transcribe_language }}" in ACTION
     assert "--audio-revision" in ACTION
     assert "--audio-repository-branch" in ACTION
+
+
+def test_action_installs_local_whisper_only_for_effective_processing_provider() -> None:
+    plan = next(step for step in _action_steps() if step.get("id") == "provider_plan")
+    install = _step_with_script("requirements-local.txt")
+    plan_script = str(plan["run"])
+
+    assert plan.get("if") == (
+        "${{ inputs.command == 'run' || inputs.command == 'transcribe' }}"
+    )
+    assert 'validation_profile="transcribe"' in plan_script
+    assert '"whisper" in config.transcribe.providers' in plan_script
+    assert "inputs.command == 'run'" in str(install.get("if"))
+    assert "inputs.command == 'transcribe'" in str(install.get("if"))
+    assert "steps.provider_plan.outputs.local_requested == 'true'" in str(
+        install.get("if")
+    )
+    assert "requirements-local.txt" in str(install["run"])
+
+
+def test_action_provider_inputs_preserve_inherited_environment() -> None:
+    provider_inputs = {
+        "OPENAI_API_KEY": "openai_api_key",
+        "XAI_API_KEY": "xai_api_key",
+        "XAI_STT_URL": "xai_base_url",
+        "META_ASR_URL": "meta_asr_url",
+        "META_ASR_API_KEY": "meta_asr_api_key",
+    }
+
+    for step in (
+        next(step for step in _action_steps() if step.get("id") == "provider_plan"),
+        next(step for step in _action_steps() if step.get("id") == "process"),
+    ):
+        environment = step.get("env", {})
+        script = str(step["run"])
+        for canonical_name, input_name in provider_inputs.items():
+            input_variable = f"INPUT_{canonical_name}"
+            assert environment.get(input_variable) == (
+                f"${{{{ inputs.{input_name} }}}}"
+            )
+            assert environment.get(canonical_name) != (
+                f"${{{{ inputs.{input_name} }}}}"
+            )
+            assert f"export {canonical_name}" in script
 
 
 def test_action_supports_only_processing_commands_and_performs_no_git() -> None:
@@ -152,12 +213,12 @@ def test_ci_executes_the_real_action_offline_in_both_layouts() -> None:
 def test_real_audio_workflow_is_a_pure_action_consumer() -> None:
     assert "workflow_dispatch:" in REAL_AUDIO
     assert "branches: [v1]" in REAL_AUDIO
-    assert "types: [closed]" in REAL_AUDIO
+    assert "types: [opened, synchronize, reopened, closed]" in REAL_AUDIO
     assert (
         "github.event_name == 'workflow_dispatch' || "
+        "github.event.action != 'closed' || "
         "github.event.pull_request.merged == true"
     ) in REAL_AUDIO
-    assert "synchronize" not in REAL_AUDIO
     assert REAL_AUDIO.count("uses: ./") == 2
     assert "command: transcribe" in REAL_AUDIO
     assert "command: verify" in REAL_AUDIO

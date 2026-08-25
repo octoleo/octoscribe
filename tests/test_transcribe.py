@@ -803,18 +803,14 @@ def test_batch_stats_summary():
 def test_normalize_text_preserves_words():
     raw = "  Thus  says \r\nthe Lord.  \n\n\n\nAmen.  "
     out = _normalize_text(raw)
-    # Words must be intact.
-    assert "Thus  says" in out
-    assert "the Lord." in out
-    assert "Amen." in out
+    assert out == "Thus says the Lord.\nAmen."
+    assert "".join(raw.split()) == "".join(out.split())
 
 
 def test_normalize_text_caps_blank_lines():
     raw = "Line one.\n\n\n\n\nLine two."
     out = _normalize_text(raw)
-    assert "\n\n\n" not in out
-    assert "Line one." in out
-    assert "Line two." in out
+    assert out == "Line one.\nLine two."
 
 
 def test_normalize_text_strips_trailing_whitespace():
@@ -822,6 +818,45 @@ def test_normalize_text_strips_trailing_whitespace():
     out = _normalize_text(raw)
     for line in out.splitlines():
         assert line == line.rstrip()
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (
+            "Dr. Smith read Rom. 8:1. Then he prayed.",
+            "Dr. Smith read Rom. 8:1.\nThen he prayed.",
+        ),
+        (
+            "Amen! “Do you believe?” Yes.",
+            "Amen!\n“Do you believe?”\nYes.",
+        ),
+        (
+            "J. C. Ryle wrote this. A.W. Tozer agreed.",
+            "J. C. Ryle wrote this.\nA.W. Tozer agreed.",
+        ),
+        (
+            "Read 1 Cor. 13:4-7. It concerns charity.",
+            "Read 1 Cor. 13:4-7.\nIt concerns charity.",
+        ),
+        (
+            "We met at 3 p.m. before supper. Then we began.",
+            "We met at 3 p.m. before supper.\nThen we began.",
+        ),
+    ],
+)
+def test_normalize_text_puts_provider_punctuated_sentences_on_lines(
+    raw: str, expected: str
+) -> None:
+    out = _normalize_text(raw)
+    assert out == expected
+    assert _normalize_text(out) == out
+    assert "".join(raw.split()) == "".join(out.split())
+
+
+def test_normalize_text_does_not_invent_unpunctuated_sentences() -> None:
+    raw = "these words have no provider punctuation so they stay together"
+    assert _normalize_text(raw) == raw
 
 
 # ---------------------------------------------------------------------------
@@ -834,3 +869,4 @@ def test_verbatim_prompt_defined_and_non_empty():
     # Core requirement keywords must be present.
     assert "EXACTLY" in VERBATIM_PROMPT
     assert "word for word" in VERBATIM_PROMPT
+    assert "each complete sentence on its own line" in VERBATIM_PROMPT

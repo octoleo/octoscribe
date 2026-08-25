@@ -21,7 +21,10 @@ composite action uses Python 3.14.
 
 `requirements-dev.txt` includes the core runtime and pytest tooling. It does
 not install the optional Faster-Whisper runtime; local backend tests replace
-that dependency with a test double.
+that dependency with a test double. Action-contract coverage requires the
+composite action to install the optional runtime only when Whisper is explicitly
+selected or when a transcription run has no configured hosted provider. A
+configured OpenAI, xAI, or Meta endpoint must keep the run API-only.
 
 The real chunk materialization test runs when `ffmpeg` and `ffprobe` are on
 `PATH` and skips cleanly otherwise.
@@ -82,7 +85,7 @@ python -m pytest --cov=src --cov-report=html
 | `test_backend_registry.py` | Canonical provider names, ordered lazy construction, model provenance, duplicates, and bad configuration. |
 | `test_xai_backend.py` | Pinned endpoint, multipart fidelity options, response parsing, word timestamps, retries, size checks, and secret-safe errors. |
 | `test_meta_backend.py` | Explicit ASR URL resolution, HTTPS/loopback rules, multipart model/language, optional bearer token, response formats, retries, and validation. |
-| `test_transcribe.py` | OpenAI and optional local adapter contracts, transport retries, empty output, backend compatibility, and batch orchestration. |
+| `test_transcribe.py` | OpenAI and optional local adapter contracts, transport retries, empty output, sentence-per-line publication normalization, backend compatibility, and batch orchestration. |
 | `test_transcriber_ensemble.py` | Batch integration with the ensemble, normally published `completed_with_warnings` results, hashes, provider failures, and manifest/report links. |
 | `test_transcribe_cmd.py` | Caller-supplied audio revision/branch provenance and Git-independent transcription. |
 | `test_transcribe_hardening.py` | Collision-safe output paths and the empty-result failure guard. |
@@ -136,6 +139,22 @@ Include long-duration plans (including 90-minute inputs) to prove that the
 recording is partitioned into bounded requests with the configured overlap and
 without gaps. Such tests operate on duration/boundary policy and do not require
 a 90-minute fixture file.
+
+### Publication formatting and hashes
+
+Sentence-per-line tests must prove that formatting occurs after seam stitching
+and changes whitespace only. Cover periods, questions, exclamations, closing
+quotation marks, initials, common abbreviations, and Scripture references.
+Formatting must be idempotent, and the ordered non-whitespace characters before
+and after it must be identical. The formatter must not invent punctuation for
+an unpunctuated provider result.
+
+For ensemble output, assert that the evidence report's
+`final_transcript_sha256`, the manifest's `transcript_sha256`, and the bytes in
+the published transcript all match after sentence formatting. Raw candidate
+text and candidate hashes must remain unchanged. This guards the required
+order: stitch raw canonical text, format the completed surface, hash it, then
+publish and record it.
 
 ### Provider independence and hard stop
 
@@ -317,7 +336,9 @@ production silence-aware chunk plans, and decodes short materialized windows
 without a network call. With the repository secret `OPENAI_API_KEY` present,
 the separate real-audio workflow transcribes both complete recordings through
 the composite action and validates transcript/evidence links, hashes, and every
-recorded chunk seam. Fully aligned seams produce `machine_transcribed`; an
+recorded chunk seam. Generated and committed reference transcripts use the
+same sentence-per-line, whitespace-only publication format. Fully aligned
+seams produce `machine_transcribed`; an
 unaligned seam produces the normally published `completed_with_warnings` state.
 Neither state withholds the transcript.
 

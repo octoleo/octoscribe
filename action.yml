@@ -213,18 +213,43 @@ runs:
         OCTOSCRIBE_ACTION_PATH: ${{ github.action_path }}
       run: python3 -m pip install -r "$OCTOSCRIBE_ACTION_PATH/requirements.txt"
 
-    - name: Install optional local Whisper runtime
+    - name: Resolve transcription provider plan
+      id: provider_plan
+      if: ${{ inputs.command == 'run' || inputs.command == 'transcribe' }}
       shell: bash
       env:
         OCTOSCRIBE_ACTION_PATH: ${{ github.action_path }}
         INPUT_CONFIG_PATH: ${{ inputs.config_path }}
         INPUT_TRANSCRIBE_BACKEND: ${{ inputs.transcribe_backend }}
         INPUT_PROVIDERS: ${{ inputs.providers }}
+        INPUT_OPENAI_API_KEY: ${{ inputs.openai_api_key }}
+        INPUT_XAI_API_KEY: ${{ inputs.xai_api_key }}
+        INPUT_XAI_STT_URL: ${{ inputs.xai_base_url }}
+        INPUT_META_ASR_URL: ${{ inputs.meta_asr_url }}
+        INPUT_META_ASR_API_KEY: ${{ inputs.meta_asr_api_key }}
+        INPUT_META_ASR_MODEL: ${{ inputs.meta_asr_model }}
+        INPUT_META_ASR_LANGUAGE: ${{ inputs.meta_asr_language }}
+        INPUT_TRANSCRIBE_MODEL: ${{ inputs.transcribe_model }}
+        INPUT_TRANSCRIBE_LANGUAGE: ${{ inputs.transcribe_language }}
       run: |
         set -euo pipefail
-        LOCAL_REQUESTED="$(python3 - "$OCTOSCRIBE_ACTION_PATH" \
+
+        # A non-empty action input wins; otherwise preserve any provider
+        # credential/endpoint inherited from the calling job environment.
+        if [ -n "$INPUT_OPENAI_API_KEY" ]; then export OPENAI_API_KEY="$INPUT_OPENAI_API_KEY"; fi
+        if [ -n "$INPUT_XAI_API_KEY" ]; then export XAI_API_KEY="$INPUT_XAI_API_KEY"; fi
+        if [ -n "$INPUT_XAI_STT_URL" ]; then export XAI_STT_URL="$INPUT_XAI_STT_URL"; fi
+        if [ -n "$INPUT_META_ASR_URL" ]; then export META_ASR_URL="$INPUT_META_ASR_URL"; fi
+        if [ -n "$INPUT_META_ASR_API_KEY" ]; then export META_ASR_API_KEY="$INPUT_META_ASR_API_KEY"; fi
+        if [ -n "$INPUT_META_ASR_MODEL" ]; then export META_ASR_MODEL="$INPUT_META_ASR_MODEL"; fi
+        if [ -n "$INPUT_META_ASR_LANGUAGE" ]; then export META_ASR_LANGUAGE="$INPUT_META_ASR_LANGUAGE"; fi
+        if [ -n "$INPUT_TRANSCRIBE_MODEL" ]; then export TRANSCRIBE_MODEL="$INPUT_TRANSCRIBE_MODEL"; fi
+        if [ -n "$INPUT_TRANSCRIBE_LANGUAGE" ]; then export TRANSCRIBE_LANGUAGE="$INPUT_TRANSCRIBE_LANGUAGE"; fi
+
+        python3 - "$OCTOSCRIBE_ACTION_PATH" \
           "$INPUT_CONFIG_PATH" "$INPUT_TRANSCRIBE_BACKEND" \
           "$INPUT_PROVIDERS" <<'PY'
+        import os
         import sys
         action_path, config_path, backend, providers = sys.argv[1:]
         sys.path.insert(0, action_path)
@@ -235,17 +260,26 @@ runs:
         if providers:
             overrides["transcribe__providers"] = providers
         config = Config.load(ini_path=config_path or None,
-                             validation_profile="status", **overrides)
-        requested = (config.transcribe.backend.strip().lower() == "local"
-                     or "whisper" in config.transcribe.providers)
-        print("true" if requested else "false")
+                             validation_profile="transcribe", **overrides)
+        selected = ",".join(config.transcribe.providers)
+        local_requested = "whisper" in config.transcribe.providers
+        with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+            output.write(f"providers={selected}\n")
+            output.write(
+                f"local_requested={'true' if local_requested else 'false'}\n"
+            )
+        print(
+            "OctoScribe provider plan: "
+            f"providers={selected} local_whisper={str(local_requested).lower()}"
+        )
         PY
-        )"
-        if [ "$LOCAL_REQUESTED" = 'true' ]; then
-          python3 -m pip install -r "$OCTOSCRIBE_ACTION_PATH/requirements-local.txt"
-        else
-          echo 'Local Whisper is not enabled; skipping its optional runtime.'
-        fi
+
+    - name: Install local Whisper runtime
+      if: ${{ (inputs.command == 'run' || inputs.command == 'transcribe') && steps.provider_plan.outputs.local_requested == 'true' }}
+      shell: bash
+      env:
+        OCTOSCRIBE_ACTION_PATH: ${{ github.action_path }}
+      run: python3 -m pip install -r "$OCTOSCRIBE_ACTION_PATH/requirements-local.txt"
 
     - name: Run OctoScribe
       id: process
@@ -259,11 +293,11 @@ runs:
         INPUT_TELEGRAM_GROUP: ${{ inputs.telegram_group }}
         INPUT_SOURCE: ${{ inputs.source }}
         INPUT_SOURCE_FOLDER: ${{ inputs.source_folder }}
-        OPENAI_API_KEY: ${{ inputs.openai_api_key }}
-        XAI_API_KEY: ${{ inputs.xai_api_key }}
-        XAI_STT_URL: ${{ inputs.xai_base_url }}
-        META_ASR_URL: ${{ inputs.meta_asr_url }}
-        META_ASR_API_KEY: ${{ inputs.meta_asr_api_key }}
+        INPUT_OPENAI_API_KEY: ${{ inputs.openai_api_key }}
+        INPUT_XAI_API_KEY: ${{ inputs.xai_api_key }}
+        INPUT_XAI_STT_URL: ${{ inputs.xai_base_url }}
+        INPUT_META_ASR_URL: ${{ inputs.meta_asr_url }}
+        INPUT_META_ASR_API_KEY: ${{ inputs.meta_asr_api_key }}
         META_ASR_MODEL: ${{ inputs.meta_asr_model }}
         META_ASR_LANGUAGE: ${{ inputs.meta_asr_language }}
         TRANSCRIBE_MODEL: ${{ inputs.transcribe_model }}
@@ -295,6 +329,15 @@ runs:
         TELEGRAM_PHONE: ${{ inputs.telegram_phone }}
       run: |
         set -euo pipefail
+
+        # Non-empty action inputs override caller environment variables.
+        # Blank inputs deliberately leave inherited provider configuration
+        # intact so repository/organization secrets may be exposed as env.
+        if [ -n "$INPUT_OPENAI_API_KEY" ]; then export OPENAI_API_KEY="$INPUT_OPENAI_API_KEY"; fi
+        if [ -n "$INPUT_XAI_API_KEY" ]; then export XAI_API_KEY="$INPUT_XAI_API_KEY"; fi
+        if [ -n "$INPUT_XAI_STT_URL" ]; then export XAI_STT_URL="$INPUT_XAI_STT_URL"; fi
+        if [ -n "$INPUT_META_ASR_URL" ]; then export META_ASR_URL="$INPUT_META_ASR_URL"; fi
+        if [ -n "$INPUT_META_ASR_API_KEY" ]; then export META_ASR_API_KEY="$INPUT_META_ASR_API_KEY"; fi
 
         EFFECTIVE_AUDIO_PATH="${INPUT_AUDIO_PATH:-${AUDIO_PATH:-./audio}}"
         EFFECTIVE_TRANSCRIPT_PATH="${INPUT_TRANSCRIPT_PATH:-${TRANSCRIPT_PATH:-./transcriptions}}"

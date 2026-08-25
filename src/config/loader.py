@@ -640,6 +640,16 @@ class _ConfigLoader:
                 discovered.append("meta")
             if backend_name in {"local", "whisper"}:
                 discovered.append("whisper")
+            # Hosted providers are preferred whenever their credentials or
+            # endpoint are available.  Local Whisper is the zero-credential
+            # fallback only for commands that actually transcribe audio;
+            # download, verify, status, and support commands must never pull
+            # in the large optional local runtime merely to inspect state.
+            if (
+                not discovered
+                and self._validation_profile in {"run", "transcribe"}
+            ):
+                discovered.append("whisper")
             providers = tuple(discovered)
 
         primary_raw = self._override(

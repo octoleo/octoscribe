@@ -5,7 +5,9 @@ audio such as sermons. It accepts audio from Telegram or an already-prepared
 folder, splits long recordings into deterministic overlapping chunks, runs one
 to three independent speech-to-text providers, and writes transcripts,
 comparison reports, raw candidates, and a persistent manifest to caller-owned
-workspace paths.
+workspace paths. Published transcript text is presentation-normalized so each
+recognized sentence occupies its own line, without changing the provider's
+words or punctuation.
 
 ## Three paths are the contract
 
@@ -146,7 +148,7 @@ three paths, caller-owned checkouts, and providers are required.
 | `TRANSCRIBE_MODEL`, `TRANSCRIBE_LANGUAGE` | `gpt-transcribe`, `en` | Primary transcription model and language hint. |
 | `XAI_BASE_URL` | `https://api.x.ai/v1/stt` | xAI STT URL; retain the official TLS endpoint. |
 | `META_ASR_URL`, `META_ASR_MODEL`, `META_ASR_LANGUAGE` | service URL, model ID, `eng_Latn` | Hosted Meta Omnilingual-compatible ASR service. |
-| `LOCAL_MODEL`, `LOCAL_DEVICE`, `LOCAL_COMPUTE_TYPE` | `large-v3`, `cpu`, `int8` | Hosted-runner Faster-Whisper defaults; a self-hosted GPU can override device/compute type. |
+| `LOCAL_MODEL`, `LOCAL_DEVICE`, `LOCAL_COMPUTE_TYPE` | `large-v3`, `cpu`, `int8` | Faster-Whisper fallback/explicit-provider settings; a self-hosted GPU can override device/compute type. |
 | `OCTOSCRIBE_CONFIG_PATH`, `OCTOSCRIBE_VERBOSE` | `conf/octoscribe.ini`, `true` | Optional checked-out INI policy and debug-level logging. |
 
 The first three variables are OctoScribe's placement contract. Repository-owner
@@ -278,6 +280,15 @@ prefix of at least six exact normalized tokens is removed; otherwise both sides
 remain, the transcript is published normally, and its state becomes
 `completed_with_warnings` so the technical seam uncertainty remains visible.
 
+Sentence-per-line formatting runs only after all chunks have been stitched.
+It changes whitespace at recognized sentence boundaries and never invents,
+removes, or corrects words or punctuation. Common abbreviations, initials, and
+Scripture-reference abbreviations are kept within their sentence. Raw provider
+candidates remain unchanged. The formatted publication surface is established
+before the evidence report and manifest calculate the final transcript
+SHA-256, so both hashes identify the exact bytes written to
+`TRANSCRIPT_PATH`.
+
 Machine transcription cannot prove word-for-word identity with audio. A
 machine-generated reference transcript—including one produced by the real-audio
 workflow—is therefore not human-verified ground truth. `human_verified` means a
@@ -322,12 +333,17 @@ recording may be described as human-verified ground truth.
 ## Provider notes
 
 OpenAI `gpt-transcribe` is the recommended default. When `providers` is blank,
-credentials enable providers in OpenAI, xAI, then Meta order; the first enabled
-provider becomes primary. An explicit list remains available when exact
-selection matters. `META_ASR_URL` must serve an OpenAI-compatible transcription
-API; a text-only Llama or Ollama endpoint cannot transcribe audio. Local
-Faster-Whisper is optional, is not installed unless selected, and is generally
-less accurate than the recommended hosted primary for this use case.
+configured hosted providers are discovered in OpenAI, xAI, then Meta order;
+the first enabled provider becomes primary. If any hosted provider is
+available, OctoScribe uses the API path and does not install Faster-Whisper.
+When no hosted provider is configured, a transcription run falls back to local
+Whisper. An explicit `providers: whisper` (or legacy local-backend selection)
+also requests that fallback directly. Only those two cases install the optional
+runtime from `requirements-local.txt`. An explicit provider list remains
+available when exact selection matters. `META_ASR_URL` must serve an
+OpenAI-compatible transcription API; a text-only Llama or Ollama endpoint
+cannot transcribe audio. Local Faster-Whisper is generally less accurate than
+the recommended hosted primary for this use case.
 
 ## Local use
 
@@ -371,7 +387,8 @@ The equivalent environment variables are `AUDIO_PATH`, `TRANSCRIPT_PATH`, and
 `--transcript-repo` root options are compatibility conveniences, not the
 recommended interface.
 
-Install `requirements-local.txt` only when selecting the `whisper` provider.
+Install `requirements-local.txt` only when explicitly selecting the `whisper`
+provider or when intentionally running without any configured hosted provider.
 Run `python -m pytest` after installing `requirements-dev.txt` to validate the
 project.
 
