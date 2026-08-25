@@ -222,7 +222,7 @@ def test_real_audio_workflow_is_a_pure_action_consumer() -> None:
     assert REAL_AUDIO.count("uses: ./") == 2
     assert "command: transcribe" in REAL_AUDIO
     assert "command: verify" in REAL_AUDIO
-    assert "max_word_error_rate: 0.0025" in REAL_AUDIO
+    assert "max_word_error_rate: 0.005" in REAL_AUDIO
     assert "secrets.OPENAI_API_KEY" in REAL_AUDIO
     assert "AUDIO_PATH: tests/fixtures/telegram/audio" in REAL_AUDIO
     assert "TRANSCRIPT_PATH: tests/fixtures/telegram/transcriptions" in REAL_AUDIO

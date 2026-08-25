@@ -312,9 +312,10 @@ inline Python implementation of the verifier.
 Manual capture mode is the only operation that produces bootstrap machine
 reference files; its artifact can be inspected and deliberately committed.
 Runs after a pull request is merged into `v1` require those committed references
-and compare generated text word-for-word after normalizing only case,
-punctuation, and whitespace. Every added, deleted, or substituted spoken word
-is reported; a merge-triggered run never rewrites its reference.
+and compare generated text word-for-word after normalizing case, punctuation,
+whitespace, and unambiguous contraction spelling. Every added, deleted, or
+substituted spoken word is reported; a merge-triggered run never rewrites its
+reference.
 
 The repository workflow resolves references under
 `tests/fixtures/telegram/reference-transcripts/` and writes comparison JSON
