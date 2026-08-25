@@ -16,16 +16,18 @@ The implementation is organized around these non-negotiable rules:
    or third provider can validate or dispute it, but cannot silently rewrite it.
 5. Chunk stitching is deterministic and may remove only a proven duplicate at
    the continuation prefix.
-6. Discrepancy resolution is bounded to at most one two-provider retry and one
+6. Sentence-per-line publication formatting runs after stitching and changes
+   whitespace only; it runs before the final transcript hashes are recorded.
+7. Discrepancy resolution is bounded to at most one two-provider retry and one
    third-provider arbitration pass.
-7. Unresolved provider or seam differences become
+8. Unresolved provider or seam differences become
    `completed_with_warnings`; the transcript is still completed and published
    in the normal output directory.
-8. Technical fidelity warnings never become content moderation, theological
+9. Technical fidelity warnings never become content moderation, theological
    evaluation, censorship, or a publication gate.
-9. Only explicit human comparison against the audio can produce
+10. Only explicit human comparison against the audio can produce
    `human_verified`; that provenance is not required for normal publication.
-10. OctoScribe performs no Git operations. In the recommended production
+11. OctoScribe performs no Git operations. In the recommended production
    workflow, the caller commits audio and its manifest checkpoint before
    invoking transcription with the captured revision and branch.
 
@@ -112,11 +114,19 @@ compatibility shorthands where supported; they are not the primary model.
 ### Provider discovery
 
 If `[transcribe] providers` and `OCTOSCRIBE_ASR_PROVIDERS` are both absent, the
-loader discovers configured providers in this order:
+loader discovers configured hosted providers in this order:
 
 1. `openai` when `OPENAI_API_KEY` exists;
 2. `xai` when `XAI_API_KEY` exists;
 3. `meta` when `META_ASR_URL` exists.
+
+If at least one hosted provider is discovered, the run stays API-first and
+does not enable or install Faster-Whisper. If none is configured, a
+transcription run selects `whisper` as the local fallback. Explicit selection
+always wins, so `providers = whisper` (or the legacy local backend) also
+selects it directly. The composite action installs `requirements-local.txt`
+only for an explicitly selected Whisper run or this no-hosted-provider
+fallback; commands that do not transcribe do not need the model runtime.
 
 This makes OpenAI the default primary when its key is present. Explicit
 configuration accepts one to three unique providers:
@@ -261,10 +271,11 @@ token comes from `META_ASR_API_KEY`.
 
 ### Local Faster-Whisper
 
-`LocalWhisperBackend` remains an opt-in compatibility provider named
-`whisper`. Its large model runtime is isolated in `requirements-local.txt` and
-is not installed with the core runtime. It is useful offline but is not part of
-the recommended OpenAI/xAI fidelity path.
+`LocalWhisperBackend` is the compatibility/fallback provider named `whisper`.
+Its large model runtime is isolated in `requirements-local.txt` and is not
+installed with the core runtime. It is loaded only when explicitly selected or
+when a transcription run has no configured hosted provider. It is useful
+offline but is not part of the recommended OpenAI/xAI fidelity path.
 
 ## Bounded comparison state machine
 
@@ -344,9 +355,20 @@ normal output directory, and the recording becomes `completed_with_warnings`.
 This can leave duplicated words in the completed transcript, which is safer
 than silently deleting possibly spoken words.
 
-After stitching, publication normalization is whitespace-only: line endings,
-trailing spaces, and excessive blank lines are made deterministic. Spoken words
-are not corrected or reformatted.
+After stitching, publication normalization remains whitespace-only. Line
+endings and spaces are made deterministic, and whitespace after recognized
+sentence-ending punctuation becomes a newline so each recognized sentence is
+published on its own line. Abbreviations, initials, and Scripture-reference
+abbreviations are protected from false boundaries. The formatter never adds or
+corrects punctuation and cannot infer a sentence boundary that the provider did
+not supply.
+
+Formatting is deliberately after seam alignment, so presentation newlines
+cannot affect overlap decisions, and before aggregate evidence and manifest
+hashing. Consequently, `final_transcript_sha256`, the manifest's
+`transcript_sha256`, and the published file all identify the same formatted
+bytes. Append-only provider candidates retain their original raw text and raw
+transcript hashes.
 
 ## Evidence model
 

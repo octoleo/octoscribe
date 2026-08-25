@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -87,6 +88,28 @@ def test_one_provider_is_machine_transcribed(tmp_path: Path) -> None:
     assert outcome.text == "Exact text."
     assert outcome.quality_state is QualityState.MACHINE_TRANSCRIBED
     assert backend.calls == 1
+
+
+def test_sentence_formatting_precedes_final_hash_but_preserves_raw_candidate(
+    tmp_path: Path,
+) -> None:
+    raw = "First sentence. Second sentence."
+    store = EvidenceStore(tmp_path / "candidates", tmp_path / "reports")
+    outcome = EnsembleEngine(
+        _config(),
+        {"openai": _Backend("openai", [raw])},
+        audio_tools=_AudioTools(),
+        model_names={"openai": "gpt-transcribe"},
+        evidence_store=store,
+    ).transcribe(_audio(tmp_path))
+
+    assert outcome.text == "First sentence.\nSecond sentence."
+    report = json.loads(outcome.evidence_report_path.read_text(encoding="utf-8"))
+    expected_hash = hashlib.sha256(outcome.text.encode("utf-8")).hexdigest()
+    assert report["final_transcript_sha256"] == expected_hash
+    assert report["chunks"][0]["attempts"][0]["raw_transcript"] == raw
+    candidate = json.loads(outcome.candidate_paths[0].read_text(encoding="utf-8"))
+    assert candidate["attempt"]["raw_transcript"] == raw
 
 
 def test_two_providers_ignore_punctuation_case_for_agreement(tmp_path: Path) -> None:
@@ -301,7 +324,7 @@ def test_exact_overlap_is_removed_without_rewriting_primary(tmp_path: Path) -> N
         {"openai": backend},
         audio_tools=_AudioTools(duration_ms=1_200_000, chunk_count=2),
     ).transcribe(_audio(tmp_path))
-    assert outcome.text == "Opening now Jesus Christ alone is our risen Lord. Closing"
+    assert outcome.text == "Opening now Jesus Christ alone is our risen Lord.\nClosing"
     assert outcome.quality_state is QualityState.MACHINE_TRANSCRIBED
     assert outcome.seams[0].alignment is not None
 

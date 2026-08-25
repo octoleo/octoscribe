@@ -21,6 +21,7 @@ from src.transcribe.chunking import (
     ChunkMetadata,
     plan_chunks,
 )
+from src.transcribe.normalize import normalize_text
 from src.transcribe.transcriber import Transcriber
 
 
@@ -45,6 +46,16 @@ EXPECTED = {
         "planned_chunks": 4,
     },
 }
+
+
+def test_reference_transcripts_are_deterministic_sentence_per_line() -> None:
+    references = FIXTURE_ROOT / "reference-transcripts"
+    paths = sorted(references.glob("*.txt"))
+    assert len(paths) == len(EXPECTED)
+    for path in paths:
+        text = path.read_text(encoding="utf-8").rstrip("\n")
+        assert text == normalize_text(text)
+        assert len(text.splitlines()) > 100
 
 
 def test_fixture_manifest_preserves_telegram_contract_and_pending_state() -> None:

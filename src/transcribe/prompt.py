@@ -19,5 +19,6 @@ VERBATIM_PROMPT: str = (
     "Do NOT paraphrase or rephrase anything. "
     "Preserve every repetition exactly as spoken. "
     "Add only standard punctuation and capitalization — nothing else. "
+    "Put each complete sentence on its own line. "
     "Do NOT add headings, labels, speaker names, or any text not spoken."
 )

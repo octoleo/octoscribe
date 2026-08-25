@@ -204,6 +204,55 @@ class TestEnvVarLoading:
         assert cfg.transcribe.meta_asr_language == "eng_Latn"
         assert cfg.transcribe.model == "gpt-transcribe"
 
+    @pytest.mark.parametrize(
+        ("providers", "expected"),
+        [
+            ("openai", ("openai",)),
+            ("whisper", ("whisper",)),
+            ("xai", ("xai",)),
+            ("meta", ("meta",)),
+        ],
+    )
+    def test_explicit_provider_selection_is_authoritative_when_other_apis_exist(
+        self,
+        providers: str,
+        expected: tuple[str, ...],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _minimal_env(
+            monkeypatch,
+            extra={
+                "XAI_API_KEY": "xai-test",
+                "META_ASR_URL": "http://localhost:8080",
+            },
+        )
+
+        cfg = Config.load(
+            ini_path=tmp_path / "none.ini",
+            transcribe__providers=providers,
+        )
+
+        assert cfg.transcribe.providers == expected
+        assert cfg.transcribe.primary_provider == expected[0]
+
+    def test_explicit_local_backend_wins_over_discovered_api_credentials(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _minimal_env(
+            monkeypatch,
+            extra={
+                "XAI_API_KEY": "xai-test",
+                "META_ASR_URL": "http://localhost:8080",
+            },
+        )
+        ini = _write_ini(tmp_path, "[transcribe]\nbackend = local\n")
+
+        cfg = Config.load(ini_path=ini)
+
+        assert cfg.transcribe.providers == ("whisper",)
+        assert cfg.transcribe.primary_provider == "whisper"
+
     def test_plain_api_key_override_cannot_cross_provider_boundaries(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -273,8 +322,34 @@ class TestCommandValidationProfiles:
             "OPENAI_API_KEY",
             "XAI_API_KEY",
             "META_ASR_URL",
+            "META_ASR_API_KEY",
+            "OCTOSCRIBE_ASR_PROVIDERS",
+            "OCTOSCRIBE_PRIMARY_ASR",
+            "TRANSCRIBE_BACKEND",
         ):
             monkeypatch.delenv(name, raising=False)
+
+    @pytest.mark.parametrize("profile", ["run", "transcribe"])
+    def test_processing_without_api_credentials_falls_back_to_whisper(
+        self,
+        profile: str,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        self._clear_credentials(monkeypatch)
+        if profile == "run":
+            for key, value in _REQUIRED_ENV.items():
+                if key != "OPENAI_API_KEY":
+                    monkeypatch.setenv(key, value)
+
+        cfg = Config.load(
+            ini_path=tmp_path / "none.ini",
+            env_file=tmp_path / "none.env",
+            validation_profile=profile,
+        )
+
+        assert cfg.transcribe.providers == ("whisper",)
+        assert cfg.transcribe.primary_provider == "whisper"
 
     def test_folder_download_requires_neither_telegram_nor_asr(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -315,7 +390,9 @@ class TestCommandValidationProfiles:
         assert cfg.transcribe.providers == ("openai",)
         assert cfg.telegram.api_id is None
 
-    @pytest.mark.parametrize("profile", ["status", "session", "ci-export"])
+    @pytest.mark.parametrize(
+        "profile", ["verify", "status", "session", "ci-export", "debug"]
+    )
     def test_non_processing_commands_require_no_service_credentials(
         self,
         profile: str,
@@ -323,6 +400,10 @@ class TestCommandValidationProfiles:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         self._clear_credentials(monkeypatch)
+        if profile == "debug":
+            for key, value in _REQUIRED_ENV.items():
+                if key != "OPENAI_API_KEY":
+                    monkeypatch.setenv(key, value)
         cfg = Config.load(
             ini_path=tmp_path / "none.ini",
             validation_profile=profile,
@@ -607,8 +688,10 @@ class TestOpenAiBackendWithoutKey:
         cfg = Config.load(ini_path=ini, env_file=tmp_path / "none.env")
         assert cfg.transcribe.backend == "local"
         assert cfg.transcribe.api_key is None
+        assert cfg.transcribe.providers == ("whisper",)
+        assert cfg.transcribe.primary_provider == "whisper"
 
-    def test_error_message_mentions_openai_key(
+    def test_explicit_openai_provider_error_mentions_openai_key(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -619,7 +702,11 @@ class TestOpenAiBackendWithoutKey:
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
         with pytest.raises(SystemExit):
-            Config.load(ini_path=tmp_path / "none.ini", env_file=tmp_path / "none.env")
+            Config.load(
+                ini_path=tmp_path / "none.ini",
+                env_file=tmp_path / "none.env",
+                transcribe__providers="openai",
+            )
 
         captured = capsys.readouterr()
         assert "OPENAI_API_KEY" in captured.err

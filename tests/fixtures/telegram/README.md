@@ -34,6 +34,14 @@ reference files as workflow artifacts. Committed references live under
 `reference-transcripts/`; machine-readable added/deleted/substituted-word
 reports are written under `comparison-reports/`.
 
+Generated and committed reference transcripts use OctoScribe's
+sentence-per-line publication format. That formatter runs after deterministic
+chunk stitching and changes whitespace only; it does not add, remove, correct,
+or reinterpret any spoken words or provider punctuation. Formatting occurs
+before the final transcript SHA-256 is written to the evidence report and
+manifest, so those hashes match the exact published bytes. Raw provider
+candidates remain unchanged.
+
 Manual capture mode is the only way that workflow produces bootstrap machine
 reference files; its artifact can be inspected and deliberately committed. A
 run after merge into `v1` requires those committed references and compares
@@ -65,3 +73,9 @@ detection, and repeat-run consistency. Word-error accuracy can be claimed only
 for a reference that a person separately checked while listening to the
 complete source audio. No quality state performs theological judgment, content
 moderation, or approval of the Christian material.
+
+The real-audio fixture configures OpenAI and therefore follows the API-only
+path; it must not install the optional Faster-Whisper runtime. In general that
+runtime is installed only when `whisper` is explicitly selected or when a
+transcription run has no configured hosted provider and uses the local
+fallback.

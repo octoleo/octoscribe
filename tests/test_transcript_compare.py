@@ -16,14 +16,58 @@ from src.transcript_compare import (
 )
 
 
-def test_spoken_words_ignore_only_case_punctuation_and_whitespace() -> None:
+def test_spoken_words_normalize_case_punctuation_whitespace_and_contractions() -> None:
     assert spoken_words("  DON'T fear; Faith—comes.\n") == (
-        "dont",
+        "do",
+        "not",
         "fear",
         "faith",
         "comes",
     )
     assert spoken_words("word") != spoken_words("world")
+
+
+@pytest.mark.parametrize(
+    ("contracted", "expanded"),
+    [
+        ("You're ready.", "You are ready."),
+        ("youre ready", "you are ready"),
+        ("I'm listening.", "I am listening."),
+        ("They've arrived.", "They have arrived."),
+        ("We couldn't leave.", "We could not leave."),
+        ("She'll return.", "She will return."),
+    ],
+)
+def test_unambiguous_contractions_compare_as_their_expanded_words(
+    contracted: str, expanded: str
+) -> None:
+    assert spoken_words(contracted) == spoken_words(expanded)
+    result = compare_word_sequences(spoken_words(contracted), spoken_words(expanded))
+    assert result["exact_spoken_word_match"] is True
+    assert result["differences"] == []
+
+
+def test_ambiguous_hes_is_not_guessed_as_is_or_has() -> None:
+    assert spoken_words("He's finished.") == ("hes", "finished")
+    assert spoken_words("He's finished.") != spoken_words("He is finished.")
+    assert spoken_words("He's finished.") != spoken_words("He has finished.")
+
+
+def test_expanded_negative_contraction_remains_a_protected_difference() -> None:
+    result = compare_word_sequences(
+        spoken_words("Don't fear."), spoken_words("Do now fear.")
+    )
+    assert result["exact_spoken_word_match"] is False
+    assert result["protected_difference_count"] == 1
+    assert result["differences"] == [
+        {
+            "operation": "substitution",
+            "reference_index": 1,
+            "generated_index": 1,
+            "reference_word": "not",
+            "generated_word": "now",
+        }
+    ]
 
 
 def test_alignment_reports_every_addition_deletion_and_substitution() -> None:
