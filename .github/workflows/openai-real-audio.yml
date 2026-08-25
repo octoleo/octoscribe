@@ -1,0 +1,72 @@
+name: OpenAI Real Audio
+
+on:
+  workflow_dispatch:
+    inputs:
+      capture_reference:
+        description: 'Capture generated transcripts as initial reference artifacts'
+        required: false
+        default: false
+        type: boolean
+  pull_request:
+    branches: [v1]
+    types: [opened, synchronize, reopened, closed]
+
+permissions:
+  contents: read
+
+env:
+  AUDIO_PATH: tests/fixtures/telegram/audio
+  TRANSCRIPT_PATH: tests/fixtures/telegram/transcriptions
+  MANIFEST_PATH: tests/fixtures/telegram/manifest.json
+  REFERENCE_PATH: tests/fixtures/telegram/reference-transcripts
+  COMPARISON_REPORT_PATH: tests/fixtures/telegram/comparison-reports
+
+jobs:
+  verify-real-audio:
+    name: Transcribe and compare real Telegram OGG files
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.action != 'closed' || github.event.pull_request.merged == true }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Check out the exact revision under test
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Transcribe the two pending real Telegram OGG fixtures
+        uses: ./
+        with:
+          command: transcribe
+          providers: openai
+          primary_provider: openai
+          openai_api_key: ${{ secrets.OPENAI_API_KEY }}
+          transcribe_model: gpt-transcribe
+          transcribe_language: en
+          audio_revision: ${{ github.sha }}
+          audio_repository_branch: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref || github.ref_name }}
+          verbose: true
+
+      - name: Verify generated text against committed reference transcripts
+        uses: ./
+        with:
+          command: verify
+          reference_required: false
+          capture_reference: ${{ github.event_name == 'workflow_dispatch' && inputs.capture_reference || false }}
+
+      - name: Upload generated transcripts and comparison evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: openai-real-audio-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.MANIFEST_PATH }}
+            ${{ env.TRANSCRIPT_PATH }}
+            tests/fixtures/telegram/candidates
+            tests/fixtures/telegram/reports
+            ${{ env.COMPARISON_REPORT_PATH }}
+            ${{ env.REFERENCE_PATH }}
+          if-no-files-found: error
+          retention-days: 14

@@ -127,6 +127,8 @@ manifest_file = manifest.json
 session_dir = ~/.octoscribe/session
 artifacts_dir = candidates
 reports_dir = reports
+reference_dir = reference-transcripts
+comparison_reports_dir = comparison-reports
 """
 
 
@@ -287,6 +289,17 @@ class _ConfigLoader:
         if key in self._overrides:
             return self._overrides[key]
         return value
+
+    @staticmethod
+    def _relative_environment_path(name: str, fallback: Any) -> Any:
+        """Return a relative path environment override or the supplied fallback."""
+        raw = os.environ.get(name)
+        if raw is None or not raw.strip():
+            return fallback
+        candidate = Path(raw.strip())
+        if candidate.is_absolute() or ".." in candidate.parts:
+            _die([f"{name} must be a relative path without '..' components."])
+        return raw.strip()
 
     def _secret_override(self, section: str, key: str, value: Any) -> Any:
         """Apply only a section-qualified override to a credential.
@@ -487,10 +500,20 @@ class _ConfigLoader:
             )
         )
         audio_dir_raw = self._override(
-            "paths", "audio_dir", ini.get("paths", "audio_dir", fallback="audio")
+            "paths",
+            "audio_dir",
+            self._relative_environment_path(
+                "AUDIO_DIR",
+                ini.get("paths", "audio_dir", fallback="audio"),
+            ),
         )
         manifest_raw = self._override(
-            "paths", "manifest_file", ini.get("paths", "manifest_file", fallback="manifest.json")
+            "paths",
+            "manifest_file",
+            self._relative_environment_path(
+                "MANIFEST_FILE",
+                ini.get("paths", "manifest_file", fallback="manifest.json"),
+            ),
         )
 
         return DownloadConfig(
@@ -760,16 +783,54 @@ class _ConfigLoader:
         transcriptions_dir_raw = self._override(
             "paths",
             "transcriptions_dir",
-            ini.get("paths", "transcriptions_dir", fallback="transcriptions"),
+            self._relative_environment_path(
+                "TRANSCRIPTIONS_DIR",
+                ini.get("paths", "transcriptions_dir", fallback="transcriptions"),
+            ),
         )
         manifest_raw = self._override(
-            "paths", "manifest_file", ini.get("paths", "manifest_file", fallback="manifest.json")
+            "paths",
+            "manifest_file",
+            self._relative_environment_path(
+                "MANIFEST_FILE",
+                ini.get("paths", "manifest_file", fallback="manifest.json"),
+            ),
         )
         artifacts_raw = self._override(
-            "paths", "artifacts_dir", ini.get("paths", "artifacts_dir", fallback="candidates")
+            "paths",
+            "artifacts_dir",
+            self._relative_environment_path(
+                "CANDIDATES_DIR",
+                ini.get("paths", "artifacts_dir", fallback="candidates"),
+            ),
         )
         reports_raw = self._override(
-            "paths", "reports_dir", ini.get("paths", "reports_dir", fallback="reports")
+            "paths",
+            "reports_dir",
+            self._relative_environment_path(
+                "REPORTS_DIR",
+                ini.get("paths", "reports_dir", fallback="reports"),
+            ),
+        )
+        reference_raw = self._override(
+            "paths",
+            "reference_dir",
+            self._relative_environment_path(
+                "REFERENCE_DIR",
+                ini.get("paths", "reference_dir", fallback="reference-transcripts"),
+            ),
+        )
+        comparison_reports_raw = self._override(
+            "paths",
+            "comparison_reports_dir",
+            self._relative_environment_path(
+                "COMPARISON_REPORTS_DIR",
+                ini.get(
+                    "paths",
+                    "comparison_reports_dir",
+                    fallback="comparison-reports",
+                ),
+            ),
         )
 
         return TranscribeConfig(
@@ -814,6 +875,11 @@ class _ConfigLoader:
             arbitration_limit=arbitration_limit,
             artifacts_dir=_resolve_path(artifacts_raw, data_root),
             reports_dir=_resolve_path(reports_raw, data_root),
+            reference_dir=_resolve_path(reference_raw, data_root),
+            comparison_reports_dir=_resolve_path(
+                comparison_reports_raw,
+                data_root,
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -837,6 +903,7 @@ class _ConfigLoader:
             "run",
             "download",
             "transcribe",
+            "verify",
             "status",
             "debug",
             "ci-export",
@@ -1039,6 +1106,12 @@ class _ConfigLoader:
             ),
             ("paths.artifacts_dir", transcribe.artifacts_dir, text_root),
             ("paths.reports_dir", transcribe.reports_dir, text_root),
+            ("paths.reference_dir", transcribe.reference_dir, text_root),
+            (
+                "paths.comparison_reports_dir",
+                transcribe.comparison_reports_dir,
+                text_root,
+            ),
         )
         for label, path, root in path_ownership:
             if path is not None and not _is_within(path, root):

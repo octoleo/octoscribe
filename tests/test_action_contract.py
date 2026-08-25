@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import hashlib
 import re
-import runpy
 from pathlib import Path
 
 import pytest
@@ -14,7 +12,9 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 ACTION = (ROOT / "action.yml").read_text(encoding="utf-8")
 CI = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-LIVE_VERIFIER = ROOT / "tests" / "openai_live_verifier.py"
+REAL_AUDIO = (ROOT / ".github" / "workflows" / "openai-real-audio.yml").read_text(
+    encoding="utf-8"
+)
 PIPELINE = (ROOT / "examples" / "pipeline.yml").read_text(
     encoding="utf-8"
 )
@@ -35,12 +35,22 @@ def _input_stanza(name: str) -> str:
 
 
 def test_action_path_layout_is_explicit_and_unambiguous() -> None:
-    for name in ("audio_repo_path", "transcript_repo_path", "data_repo_path"):
+    for name in (
+        "audio_path",
+        "transcript_path",
+        "manifest_path",
+        "audio_repo_path",
+        "transcript_repo_path",
+        "data_repo_path",
+    ):
         assert "default: ''" in _input_stanza(name)
+    assert '${INPUT_AUDIO_PATH:-${AUDIO_PATH:-./audio}}' in ACTION
+    assert '${INPUT_TRANSCRIPT_PATH:-${TRANSCRIPT_PATH:-./transcriptions}}' in ACTION
+    assert '${INPUT_MANIFEST_PATH:-${MANIFEST_PATH:-./manifest.json}}' in ACTION
 
     assert "Supply data_repo_path, or supply both audio_repo_path" in ACTION
     assert "Use data_repo_path alone" in ACTION
-    assert "Path(audio_path).resolve() == Path(text_path).resolve()" in ACTION
+    assert "Path(audio_repo_path).resolve() == Path(text_repo_path).resolve()" in ACTION
     assert "use data_repo_path for a shared layout" in ACTION
 
 
@@ -74,7 +84,7 @@ def test_action_exposes_complete_provider_and_provenance_controls() -> None:
 
 
 def test_action_supports_only_processing_commands_and_performs_no_git() -> None:
-    assert "run|download|transcribe|status" in ACTION
+    assert "run|download|transcribe|verify|status" in ACTION
     assert "run|download|transcribe|sync|status" not in ACTION
     assert "no_push" not in ACTION
     assert "--no-push" not in ACTION
@@ -119,7 +129,7 @@ def test_action_exposes_resolved_artifact_paths() -> None:
 
 def test_ci_executes_the_real_action_offline_in_both_layouts() -> None:
     assert "layout: [split, shared]" in CI
-    assert CI.count("uses: ./") == 4
+    assert CI.count("uses: ./") == 2
     assert "tests/action_smoke_server.py" in CI
     assert "command: download" in CI
     assert "command: transcribe" in CI
@@ -131,123 +141,39 @@ def test_ci_executes_the_real_action_offline_in_both_layouts() -> None:
     assert 'report["final_transcript_sha256"]' in CI
 
 
-def test_paid_openai_test_runs_only_after_a_pr_merge_to_v1() -> None:
-    assert "types: [opened, synchronize, reopened, closed]" in CI
-    live_job = CI.split("\n  openai-live:\n", 1)[1]
-    assert "github.event_name == 'pull_request'" in live_job
-    assert "github.event.action == 'closed'" in live_job
-    assert "github.event.pull_request.merged == true" in live_job
-    assert "github.event.pull_request.base.ref == 'v1'" in live_job
-    assert "github.event_name == 'push'" not in live_job
-    assert "needs: [test, action-smoke]" in live_job
-    assert "secrets.OPENAI_API_KEY" in live_job
-    assert "OPENAI_API_KEY must be configured as a repository secret" in live_job
-    assert live_job.count("uses: ./") == 2
-    assert "tests/openai_live_verifier.py prepare" in live_job
-    assert "tests/openai_live_verifier.py verify" in live_job
-    assert "tests/openai_live_verifier.py assert-idempotent" in live_job
-    assert "tests/fixtures/telegram" in live_job
-    assert "providers: openai" in live_job
-    assert "primary_provider: openai" in live_job
-    assert "transcribe_model: gpt-transcribe" in live_job
-    assert "ref: ${{ github.event.pull_request.merge_commit_sha }}" in live_job
-    assert "audio_revision: ${{ github.event.pull_request.merge_commit_sha }}" in live_job
-    assert "audio_repository_branch: ${{ github.event.pull_request.base.ref }}" in live_job
-    assert "Validate truthful quality state, evidence, and seams" in live_job
+def test_real_audio_workflow_is_a_pure_action_consumer() -> None:
+    assert "workflow_dispatch:" in REAL_AUDIO
+    assert "branches: [v1]" in REAL_AUDIO
+    assert "types: [opened, synchronize, reopened, closed]" in REAL_AUDIO
+    assert REAL_AUDIO.count("uses: ./") == 2
+    assert "command: transcribe" in REAL_AUDIO
+    assert "command: verify" in REAL_AUDIO
+    assert "secrets.OPENAI_API_KEY" in REAL_AUDIO
+    assert "AUDIO_PATH: tests/fixtures/telegram/audio" in REAL_AUDIO
+    assert "TRANSCRIPT_PATH: tests/fixtures/telegram/transcriptions" in REAL_AUDIO
+    assert "MANIFEST_PATH: tests/fixtures/telegram/manifest.json" in REAL_AUDIO
+    assert "audio_path:" not in REAL_AUDIO
+    assert "transcript_path:" not in REAL_AUDIO
+    assert "manifest_path:" not in REAL_AUDIO
+    assert "actions/upload-artifact@v4" in REAL_AUDIO
+    assert "python" not in REAL_AUDIO.lower()
+    assert "run:" not in REAL_AUDIO
 
 
-def test_paid_openai_verifier_requires_state_to_match_seam_evidence() -> None:
-    verifier = runpy.run_path(str(LIVE_VERIFIER))
-
-    raw = "the exact overlap words are retained here"
-    transcript_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
-    expected = {
-        "filename": "clear-fixture.ogg",
-        "hash": "a" * 64,
-        "container_duration_ms": 100_000,
-        "expected_chunks": 2,
-    }
-    chunks = []
-    for index, (start, end) in enumerate(((0.0, 60.0), (48.0, 100.0))):
-        chunks.append(
-            {
-                "index": index,
-                "start_seconds": start,
-                "end_seconds": end,
-                "sha256": str(index) * 64,
-                "attempts": [
-                    {
-                        "provider": "openai",
-                        "model": "gpt-transcribe",
-                        "attempt": 1,
-                        "raw_transcript": raw,
-                        "transcript_sha256": transcript_hash,
-                    }
-                ],
-                "canonical": {"provider": "openai", "attempt": 1},
-            }
-        )
-    report = {
-        "chunks": chunks,
-        "seams": [{"left_chunk": 0, "right_chunk": 1, "aligned": True}],
-    }
-    _, all_seams_aligned = verifier["_validate_report_chunks"](report, expected)
-    assert all_seams_aligned is True
-    verifier["_require_release_quality_state"](
-        "856", "machine_transcribed", all_seams_aligned=True
-    )
-    with pytest.raises(AssertionError, match="expected 'machine_transcribed'"):
-        verifier["_require_release_quality_state"](
-            "856", "needs_review", all_seams_aligned=True
-        )
-
-    report["seams"][0]["aligned"] = False
-    _, all_seams_aligned = verifier["_validate_report_chunks"](report, expected)
-    assert all_seams_aligned is False
-    verifier["_require_release_quality_state"](
-        "856", "needs_review", all_seams_aligned=False
-    )
-    with pytest.raises(AssertionError, match="expected 'needs_review'"):
-        verifier["_require_release_quality_state"](
-            "856", "machine_transcribed", all_seams_aligned=False
-        )
+def test_ci_covers_python_314_and_ubuntu_2604() -> None:
+    assert "python-version: ['3.11', '3.12', '3.13', '3.14']" in CI
+    assert "if: matrix.python-version == '3.14'" in CI
+    assert "runs-on: ubuntu-26.04" in CI
+    assert "python -VV" in CI
+    assert "python -m pytest tests/ -v --tb=short" in CI
+    assert "Set up Python 3.14" in ACTION
+    assert "python-version: '3.14'" in ACTION
 
 
-def test_paid_openai_idempotence_pass_cannot_reach_the_cloud() -> None:
-    live_job = CI.split("\n  openai-live:\n", 1)[1]
-    rerun = live_job.split(
-        "Re-run with cloud access disabled (completed work must be skipped)", 1
-    )[1]
-    assert "OPENAI_BASE_URL: http://127.0.0.1:9/v1" in rerun
-    assert "openai_api_key: second-pass-must-not-call-openai" in rerun
-    assert "Prove the rerun preserved every persistent byte" in rerun
-
-
-def test_live_verifier_prepares_exact_owner_supplied_fixture(tmp_path: Path) -> None:
-    verifier = runpy.run_path(str(LIVE_VERIFIER))
-    fixture = ROOT / "tests" / "fixtures" / "telegram"
-    workspace = tmp_path / "data"
-    verifier["prepare_workspace"](fixture, workspace)
-
-    source_snapshot = verifier["content_snapshot"](fixture)
-    prepared_snapshot = verifier["content_snapshot"](workspace)
-    assert prepared_snapshot == {
-        path: details
-        for path, details in source_snapshot.items()
-        if path == "manifest.json" or path.startswith("audio/")
-    }
-
-    snapshot_path = tmp_path / "snapshot.json"
-    verifier["write_snapshot"](workspace, snapshot_path)
-    verifier["assert_idempotent"](workspace, snapshot_path)
-    (workspace / "manifest.json").write_text("{}", encoding="utf-8")
-    with pytest.raises(AssertionError, match="idempotent rerun changed"):
-        verifier["assert_idempotent"](workspace, snapshot_path)
-
-
-def test_ci_is_the_only_active_workflow_and_has_complete_triggers() -> None:
+def test_active_workflows_have_complete_v1_triggers() -> None:
     active = tuple(sorted((ROOT / ".github" / "workflows").glob("*.yml")))
-    assert [path.name for path in active] == ["ci.yml"]
+    active_names = {path.name for path in active} - {"pipeline.yml", "validation.yml"}
+    assert active_names == {"ci.yml", "openai-real-audio.yml"}
     assert "workflow_dispatch:" in CI
     assert "pull_request:" in CI
     assert CI.count("branches: [v1]") == 2
@@ -267,6 +193,7 @@ def test_operational_pipeline_is_an_inactive_consumer_example() -> None:
 def test_workflows_and_examples_are_valid_yaml() -> None:
     documents = (
         ROOT / ".github" / "workflows" / "ci.yml",
+        ROOT / ".github" / "workflows" / "openai-real-audio.yml",
         *EXAMPLES,
     )
     assert {path.name for path in EXAMPLES} == {
