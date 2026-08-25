@@ -7,12 +7,6 @@ on:
     - cron: '0 6 * * 1'
   workflow_dispatch:
     inputs:
-      operation:
-        description: 'Run transcription or validate the action implementation'
-        required: true
-        default: transcribe
-        type: choice
-        options: [transcribe, validate]
       repository_layout:
         description: 'split or shared evidence repositories'
         required: true
@@ -49,12 +43,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  validation:
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.operation == 'validate' }}
-    uses: ./.github/workflows/ci.yml
-
   transcribe:
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.operation != 'validate' }}
     runs-on: ubuntu-latest
     timeout-minutes: 360
     env:

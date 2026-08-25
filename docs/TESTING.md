@@ -224,15 +224,23 @@ writes, and rejection of conflicting replacement.
 
 ## CI
 
-`.github/workflows/ci.yml` runs on pushes and pull requests targeting `main` or
-`v1`, with Python 3.11 and 3.12. It installs `requirements-dev.txt`, runs the
-full suite with coverage, and uploads the Python 3.12 coverage file to Codecov
-without making Codecov availability a test gate.
+`.github/workflows/ci.yml` runs for every pull-request update targeting `v1`,
+and for pushes to that integration branch. It can also be started manually on
+any selected branch through `workflow_dispatch`. CI uses Python 3.11 and 3.12,
+installs `requirements-dev.txt`, runs the full suite with coverage, and uploads
+the Python 3.12 coverage file to Codecov without making Codecov availability a
+test gate.
 
-The CI test workflow is distinct from `.github/workflows/pipeline.yml`, which
-is the credentialed operational reference. The caller workflow owns all Git
-operations; the OctoScribe action only acquires, hashes, transcribes, records
-evidence, and reports progress to standard output.
+CI is the only active workflow in this source repository. The credentialed
+operational reference lives at `examples/pipeline.yml` for consumers to copy.
+`examples/in-repository.yml` covers the common case where the workflow checkout
+itself owns preserved audio, the persistent manifest, transcripts, raw
+candidates, and reports; it publishes through the built-in `GITHUB_TOKEN`.
+`examples/minimal.yml`, `examples/full.yml`, and `examples/pipeline.yml` retain
+the caller-managed external shared/split repository patterns.
+The caller workflow owns all Git operations; the OctoScribe action only
+acquires, hashes, transcribes, records evidence, and reports progress to
+standard output.
 
 CI validates provider contracts offline. Before promoting a model or provider
 configuration, separately evaluate it on a private, human-verified sermon set

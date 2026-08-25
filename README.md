@@ -17,6 +17,11 @@ This keeps OctoScribe focused on one job: audio-to-text conversion.
 
 Choose one of the complete templates:
 
+- [`examples/in-repository.yml`](examples/in-repository.yml) is the recommended
+  workflow when audio and text live in the repository where the workflow runs.
+  It uses the built-in `GITHUB_TOKEN`, stores `audio/`, `manifest.json`,
+  `transcriptions/`, `candidates/`, and `reports/` together, and requires no
+  `git-user` step or second data-repository checkout.
 - [`examples/full.yml`](examples/full.yml) is the recommended production
   workflow. It supports split or shared repositories, Telegram or a prepared
   folder, one to three providers, branch-aware clones, explicit audio revision
@@ -26,10 +31,10 @@ Choose one of the complete templates:
   call. It is simpler, but its transcript evidence cannot name a separately
   committed source-audio revision; use the full workflow when provenance is
   critical.
-- [`.github/workflows/pipeline.yml`](.github/workflows/pipeline.yml) is the
-  repository's operational reference and follows the full two-stage pattern.
-  Its `validate` operation runs the same Python matrix and real composite-action
-  smoke tests used by pull-request CI, without requiring provider credentials.
+- [`examples/pipeline.yml`](examples/pipeline.yml) is a complete scheduled and
+  manually dispatched operational workflow to copy into a consuming repository.
+  It follows the full two-stage pattern without activating that credentialed
+  pipeline inside the OctoScribe source repository.
 
 The production sequence is deliberately split between the action and its
 caller:
@@ -46,6 +51,17 @@ In a shared repository, the first caller commit stages `audio/` together with
 the manifest checkpoint; the final commit stages transcript evidence and the
 updated manifest. In split mode, the caller checkpoints audio first, then the
 download-state manifest, and finally transcript evidence.
+
+The in-repository template uses the workflow checkout itself as that shared
+workspace. A completed run leaves this durable layout:
+
+```text
+audio/             original source recordings
+manifest.json      persistent index; completed items are skipped on later runs
+transcriptions/    authoritative machine transcript text
+candidates/        raw responses retained from each provider
+reports/           comparison, discrepancy, hash, and provenance evidence
+```
 
 ## GitHub configuration
 

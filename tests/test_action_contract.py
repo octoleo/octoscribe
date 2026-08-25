@@ -11,7 +11,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 ACTION = (ROOT / "action.yml").read_text(encoding="utf-8")
 CI = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
-PIPELINE = (ROOT / ".github" / "workflows" / "pipeline.yml").read_text(
+PIPELINE = (ROOT / "examples" / "pipeline.yml").read_text(
     encoding="utf-8"
 )
 EXAMPLES = tuple(sorted((ROOT / "examples").glob("*.yml")))
@@ -127,21 +127,35 @@ def test_ci_executes_the_real_action_offline_in_both_layouts() -> None:
     assert 'report["final_transcript_sha256"]' in CI
 
 
-def test_pipeline_can_dispatch_the_authoritative_validation_workflow() -> None:
-    assert "workflow_call:" in CI
-    assert "options: [transcribe, validate]" in PIPELINE
-    assert "inputs.operation == 'validate'" in PIPELINE
-    assert "uses: ./.github/workflows/ci.yml" in PIPELINE
-    assert "inputs.operation != 'validate'" in PIPELINE
+def test_ci_is_the_only_active_workflow_and_has_complete_triggers() -> None:
+    active = tuple(sorted((ROOT / ".github" / "workflows").glob("*.yml")))
+    assert [path.name for path in active] == ["ci.yml"]
+    assert "workflow_dispatch:" in CI
+    assert "pull_request:" in CI
+    assert CI.count("branches: [v1]") == 2
+    assert "branches: [main" not in CI
+    assert "feature/**" not in CI
+
+
+def test_operational_pipeline_is_an_inactive_consumer_example() -> None:
+    assert "name: OctoScribe Pipeline" in PIPELINE
+    assert "workflow_dispatch:" in PIPELINE
+    assert "schedule:" in PIPELINE
+    assert "uses: octoleo/octoscribe@v1" in PIPELINE
+    assert "uses: ./.github/workflows/ci.yml" not in PIPELINE
 
 
 def test_workflows_and_examples_are_valid_yaml() -> None:
     documents = (
         ROOT / ".github" / "workflows" / "ci.yml",
-        ROOT / ".github" / "workflows" / "pipeline.yml",
         *EXAMPLES,
     )
-    assert {path.name for path in EXAMPLES} == {"full.yml", "minimal.yml"}
+    assert {path.name for path in EXAMPLES} == {
+        "full.yml",
+        "in-repository.yml",
+        "minimal.yml",
+        "pipeline.yml",
+    }
     for path in documents:
         parsed = yaml.safe_load(path.read_text(encoding="utf-8"))
         assert isinstance(parsed, dict), f"{path} must contain one YAML mapping"
@@ -188,3 +202,34 @@ def test_full_example_preserves_the_fidelity_checkpoint_order() -> None:
     assert offsets == sorted(offsets)
     assert "continue-on-error: true" in full
     assert "steps.transcribe.outcome" in full
+
+
+def test_in_repository_example_uses_one_checkout_and_builtin_auth() -> None:
+    example = (ROOT / "examples" / "in-repository.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "permissions:\n  contents: write" in example
+    assert "uses: actions/checkout@v4" in example
+    assert "uses: octoleo/git-user" not in example
+    assert "GITHUB_TOKEN" in example
+    assert "github-actions[bot]" in example
+    assert example.count("data_repo_path: .") == 2
+    assert "audio_repo_path:" not in example
+    assert "transcript_repo_path:" not in example
+    for evidence_path in (
+        "audio/",
+        "manifest.json",
+        "transcriptions/",
+        "candidates/",
+        "reports/",
+    ):
+        assert evidence_path in example
+    ordered_markers = (
+        "Download or import audio into this repository",
+        "Publish audio and index checkpoint",
+        "Capture exact audio provenance",
+        "Transcribe committed audio in this repository",
+        "Publish transcript, evidence, and updated index",
+    )
+    offsets = [example.index(marker) for marker in ordered_markers]
+    assert offsets == sorted(offsets)
