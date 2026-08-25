@@ -140,7 +140,7 @@ def minimal_config(tmp_path: Path):
         transcriptions_dir=tmp_path / "transcriptions",
         manifest_file=tmp_path / "manifest.json",
     )
-    dr = DataRepoConfig(url=None, path=tmp_path / "data", branch="main", auto_push=False)
+    dr = DataRepoConfig(path=tmp_path / "data")
     return Config(telegram=tg, download=dl, transcribe=tr, data_repo=dr, ini_path=tmp_path / "octoscribe.ini")
 
 
@@ -456,14 +456,19 @@ def _make_mock_client(messages: list, entity=None):
 
 @pytest.mark.asyncio
 async def test_run_skips_already_downloaded(minimal_config, mock_manifest, tmp_path):
-    """If manifest.is_downloaded returns True AND file exists, message is skipped."""
+    """Resume skips only when the recorded hash matches the existing file."""
     minimal_config.download.audio_dir.mkdir(parents=True, exist_ok=True)
     existing_file = minimal_config.download.audio_dir / "existing.mp3"
-    existing_file.write_bytes(b"data")
+    content = b"data"
+    existing_file.write_bytes(content)
 
     msg = _make_audio_message(msg_id=100, title="Existing")
     mock_manifest.is_downloaded.return_value = True
-    mock_manifest.get_entry.return_value = {"filename": "existing.mp3", "downloaded": True}
+    mock_manifest.get_entry.return_value = {
+        "filename": "existing.mp3",
+        "downloaded": True,
+        "hash": hashlib.sha256(content).hexdigest(),
+    }
 
     with patch("src.telegram.TelegramClient") as MockClient:
         mock_client = _make_mock_client([msg])
@@ -513,6 +518,60 @@ async def test_run_calls_mark_downloaded_for_new_files(minimal_config, mock_mani
 
 
 @pytest.mark.asyncio
+async def test_run_preserves_historical_ogg_manifest_contract(
+    minimal_config, mock_manifest
+):
+    """Telegram OGG downloads retain the established manifest fields exactly."""
+    from datetime import datetime, timezone
+
+    minimal_config.download.audio_dir.mkdir(parents=True, exist_ok=True)
+    content = b"deterministic telegram ogg fixture bytes"
+    expected_hash = hashlib.sha256(content).hexdigest()
+    msg = _make_audio_message(
+        msg_id=10,
+        title="Matthew 24:39-42",
+        performer="Family Devotions",
+        duration=1824,
+        mime="audio/ogg",
+        original_filename="record.ogg",
+    )
+    msg.date = datetime(2023, 2, 9, tzinfo=timezone.utc)
+    mock_manifest.is_downloaded.return_value = False
+    mock_manifest.all_entries.return_value = {}
+
+    async def fake_download_media(message, file=None):
+        path = Path(file)
+        path.write_bytes(content)
+        return str(path)
+
+    with patch("src.telegram.TelegramClient") as client_type:
+        client = _make_mock_client([msg])
+        client.download_media = fake_download_media
+        client_type.return_value = client
+
+        downloader = TelegramDownloader(minimal_config, mock_manifest)
+        downloader._client = client
+        stats = await downloader.run()
+
+    assert stats.downloaded == 1
+    assert (minimal_config.download.audio_dir / "Matthew 2439-42.ogg").read_bytes() == content
+    mock_manifest.mark_downloaded.assert_called_once_with(
+        10,
+        {
+            "filename": "Matthew 2439-42.ogg",
+            "title": "Matthew 24:39-42",
+            "performer": "Family Devotions",
+            "date": "2023-02-09",
+            "duration": 1824,
+            "duration_formatted": "30:24",
+            "extension": ".ogg",
+            "hash": expected_hash,
+            "original_filename": "record.ogg",
+        },
+    )
+
+
+@pytest.mark.asyncio
 async def test_run_calls_mark_failed_on_download_error(minimal_config, mock_manifest, tmp_path):
     """A download exception should call mark_failed and count as failed."""
     minimal_config.download.audio_dir.mkdir(parents=True, exist_ok=True)
@@ -534,11 +593,13 @@ async def test_run_calls_mark_failed_on_download_error(minimal_config, mock_mani
 
 @pytest.mark.asyncio
 async def test_run_deduplication_removes_duplicate_file(minimal_config, mock_manifest, tmp_path):
-    """A file whose hash matches an existing manifest entry should be deleted."""
+    """A verified duplicate is removed and its Telegram message is recorded."""
     minimal_config.download.audio_dir.mkdir(parents=True, exist_ok=True)
 
     content = b"duplicate audio bytes"
     existing_hash = hashlib.sha256(content).hexdigest()
+    original = minimal_config.download.audio_dir / "original.mp3"
+    original.write_bytes(content)
 
     msg = _make_audio_message(msg_id=400, title="Dup Track")
     mock_manifest.is_downloaded.return_value = False
@@ -562,9 +623,217 @@ async def test_run_deduplication_removes_duplicate_file(minimal_config, mock_man
 
     assert stats.duplicate == 1
     assert stats.downloaded == 0
-    # The downloaded file should have been deleted
+    # Only the verified canonical file remains; the temporary duplicate is gone.
     remaining = list(minimal_config.download.audio_dir.iterdir())
-    assert remaining == [], f"Expected no files, found {remaining}"
+    assert remaining == [original]
+    duplicate_entry = mock_manifest.mark_downloaded.call_args.args[1]
+    assert duplicate_entry["filename"] == "original.mp3"
+    assert duplicate_entry["hash"] == existing_hash
+    assert duplicate_entry["duplicate"] is True
+    assert duplicate_entry["duplicate_of"] == 1
+
+
+@pytest.mark.asyncio
+async def test_resume_reacquires_hash_mismatch_without_losing_historical_metadata(
+    minimal_config,
+):
+    """A corrupt local copy is preserved and replaced only by expected bytes."""
+    from src.manifest import Manifest
+
+    audio_dir = minimal_config.download.audio_dir
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    trusted_content = b"the original Telegram object"
+    corrupt_content = b"locally corrupted bytes"
+    trusted_hash = hashlib.sha256(trusted_content).hexdigest()
+    target = audio_dir / "Historical Sermon.ogg"
+    target.write_bytes(corrupt_content)
+
+    manifest = Manifest(minimal_config.download.manifest_file)
+    historical = {
+        "date": "2024-11-25",
+        "duration": 1412,
+        "duration_formatted": "23:32",
+        "extension": ".ogg",
+        "filename": target.name,
+        "hash": trusted_hash,
+        "original_filename": "record.ogg",
+        "performer": "Family Devotions",
+        "title": "1 Timothy 1:5-6",
+        "custom_historical_field": "must survive recovery",
+    }
+    manifest.mark_downloaded(856, historical)
+
+    msg = _make_audio_message(
+        msg_id=856,
+        title="Changed Telegram title must not rewrite history",
+        performer="Changed performer",
+        duration=1,
+        mime="audio/ogg",
+        original_filename="different.ogg",
+    )
+
+    async def fake_download_media(message, file=None):
+        path = Path(file)
+        path.write_bytes(trusted_content)
+        return str(path)
+
+    with patch("src.telegram.TelegramClient") as client_type:
+        client = _make_mock_client([msg])
+        client.download_media = fake_download_media
+        client_type.return_value = client
+        downloader = TelegramDownloader(minimal_config, manifest)
+        downloader._client = client
+        stats = await downloader.run()
+
+    assert stats.downloaded == 1
+    assert stats.failed == 0
+    assert target.read_bytes() == trusted_content
+    quarantined = list(audio_dir.glob(f"{target.name}.integrity-mismatch-*.corrupt"))
+    assert len(quarantined) == 1
+    assert quarantined[0].read_bytes() == corrupt_content
+
+    recovered = manifest.get_entry(856)
+    assert recovered is not None
+    for field, value in historical.items():
+        assert recovered[field] == value
+    assert recovered["telegram_msg_id"] == 856
+
+
+@pytest.mark.asyncio
+async def test_resume_rejects_remote_hash_mismatch_without_rewriting_evidence(
+    minimal_config,
+):
+    """Changed Telegram bytes never replace a recorded source or its hash."""
+    from src.manifest import Manifest
+
+    audio_dir = minimal_config.download.audio_dir
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    trusted_hash = hashlib.sha256(b"historically trusted content").hexdigest()
+    local_content = b"suspect local content"
+    remote_content = b"Telegram now returned different content"
+    remote_hash = hashlib.sha256(remote_content).hexdigest()
+    target = audio_dir / "Sermon.ogg"
+    target.write_bytes(local_content)
+
+    manifest = Manifest(minimal_config.download.manifest_file)
+    historical = {
+        "filename": target.name,
+        "hash": trusted_hash,
+        "title": "Historical title",
+        "performer": "Historical performer",
+        "date": "2025-02-06",
+        "duration": 1850,
+        "duration_formatted": "30:50",
+        "extension": ".ogg",
+        "original_filename": "record.ogg",
+    }
+    manifest.mark_downloaded(990, historical)
+    msg = _make_audio_message(msg_id=990, title="Sermon", mime="audio/ogg")
+
+    async def fake_download_media(message, file=None):
+        path = Path(file)
+        path.write_bytes(remote_content)
+        return str(path)
+
+    with patch("src.telegram.TelegramClient") as client_type:
+        client = _make_mock_client([msg])
+        client.download_media = fake_download_media
+        client_type.return_value = client
+        downloader = TelegramDownloader(minimal_config, manifest)
+        downloader._client = client
+        stats = await downloader.run()
+
+    assert stats.failed == 1
+    assert stats.downloaded == 0
+    assert target.read_bytes() == local_content
+    assert not list(audio_dir.glob("*.corrupt"))
+    assert not list(audio_dir.glob(".octoscribe-*"))
+
+    rejected = manifest.get_entry(990)
+    assert rejected is not None
+    for field, value in historical.items():
+        assert rejected[field] == value
+    assert rejected["failed_stage"] == "download"
+    assert trusted_hash in rejected["failed_error"]
+    assert remote_hash in rejected["failed_error"]
+
+
+@pytest.mark.asyncio
+async def test_duplicate_message_is_persisted_and_not_downloaded_on_next_run(
+    minimal_config,
+):
+    """Content deduplication is terminal acquisition state for each message ID."""
+    from src.manifest import Manifest
+
+    audio_dir = minimal_config.download.audio_dir
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    content = b"one canonical Telegram audio object"
+    content_hash = hashlib.sha256(content).hexdigest()
+    canonical = audio_dir / "Canonical.ogg"
+    canonical.write_bytes(content)
+
+    manifest = Manifest(minimal_config.download.manifest_file)
+    manifest.mark_downloaded(
+        100,
+        {
+            "filename": canonical.name,
+            "hash": content_hash,
+            "title": "Canonical",
+            "performer": "Family Devotions",
+            "date": "2025-01-01",
+            "duration": 10,
+            "duration_formatted": "0:10",
+            "extension": ".ogg",
+            "original_filename": "record.ogg",
+        },
+    )
+    duplicate_msg = _make_audio_message(
+        msg_id=101,
+        title="Reposted sermon",
+        performer="Family Devotions",
+        duration=10,
+        mime="audio/ogg",
+        original_filename="record.ogg",
+    )
+
+    async def fake_download_media(message, file=None):
+        path = Path(file)
+        path.write_bytes(content)
+        return str(path)
+
+    with patch("src.telegram.TelegramClient") as client_type:
+        first_client = _make_mock_client([duplicate_msg])
+        first_client.download_media = AsyncMock(side_effect=fake_download_media)
+        client_type.return_value = first_client
+        first_downloader = TelegramDownloader(minimal_config, manifest)
+        first_downloader._client = first_client
+        first_stats = await first_downloader.run()
+
+    assert first_stats.duplicate == 1
+    assert first_client.download_media.await_count == 1
+    duplicate_entry = manifest.get_entry(101)
+    assert duplicate_entry is not None
+    assert duplicate_entry["downloaded"] is True
+    assert duplicate_entry["telegram_msg_id"] == 101
+    assert duplicate_entry["filename"] == canonical.name
+    assert duplicate_entry["hash"] == content_hash
+    assert duplicate_entry["duplicate"] is True
+    assert duplicate_entry["duplicate_of"] == 100
+    assert duplicate_entry["title"] == "Reposted sermon"
+    assert list(audio_dir.iterdir()) == [canonical]
+
+    # The persisted duplicate entry now passes the same hash-verified resume
+    # gate as its canonical message and requires no second network transfer.
+    with patch("src.telegram.TelegramClient") as client_type:
+        second_client = _make_mock_client([duplicate_msg])
+        client_type.return_value = second_client
+        second_downloader = TelegramDownloader(minimal_config, manifest)
+        second_downloader._client = second_client
+        second_stats = await second_downloader.run()
+
+    assert second_stats.skipped == 1
+    assert second_stats.duplicate == 0
+    second_client.download_media.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -707,12 +976,7 @@ class TestRestoreSessionFromEnv:
             transcriptions_dir=tmp_path / "transcriptions",
             manifest_file=tmp_path / "manifest.json",
         )
-        dr_cfg = DataRepoConfig(
-            url=None,
-            path=tmp_path,
-            branch="main",
-            auto_push=False,
-        )
+        dr_cfg = DataRepoConfig(path=tmp_path)
         config = Config(
             telegram=tg_cfg,
             download=dl_cfg,

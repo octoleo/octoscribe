@@ -89,8 +89,11 @@ class TestPeriodicSaver:
         assert target.save.call_count == 3
 
     def test_default_interval(self) -> None:
-        saver = PeriodicSaver(MagicMock())
+        target = MagicMock()
+        saver = PeriodicSaver(target)
         assert saver._interval == DEFAULT_SAVE_INTERVAL
+        assert saver.tick() is True
+        target.save.assert_called_once_with()
 
     def test_invalid_interval_raises(self) -> None:
         with pytest.raises(ValueError):

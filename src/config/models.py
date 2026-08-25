@@ -55,7 +55,7 @@ class TranscribeConfig:
     """Transcription pipeline settings (both OpenAI and local Whisper)."""
 
     backend: str                 # "openai" | "local"
-    model: str                   # e.g. "gpt-4o-transcribe"
+    model: str                   # e.g. "gpt-transcribe"
     language: str                # e.g. "en"
     workers: int
     retry_attempts: int
@@ -77,12 +77,45 @@ class TranscribeConfig:
     transcriptions_dir: Path
     manifest_file: Path
 
+    # Fidelity-first ensemble options.  These fields are defaulted so callers
+    # constructing the legacy configuration shape continue to work unchanged.
+    # ``providers`` is ordered: the first item is the canonical transcript
+    # source unless ``primary_provider`` explicitly selects another enabled
+    # provider.
+    providers: tuple[str, ...] = ()
+    primary_provider: str = "openai"
+    xai_api_key: Optional[str] = None
+    xai_base_url: str = "https://api.x.ai/v1/stt"
+    meta_asr_url: Optional[str] = None
+    meta_asr_api_key: Optional[str] = None
+    meta_asr_model: str = "omniASR_LLM_Unlimited_7B_v2"
+    meta_asr_language: str = "eng_Latn"
+    provider_timeout_seconds: float = 900.0
+
+    # Long-recording policy.  WAV chunks are mono 16 kHz PCM; a ten-minute
+    # hard maximum remains below OpenAI's documented 25 MB request limit.
+    chunk_target_seconds: int = 480
+    chunk_max_seconds: int = 600
+    chunk_overlap_seconds: int = 12
+    silence_search_seconds: int = 45
+    silence_threshold_db: float = -35.0
+    silence_min_ms: int = 500
+    max_chunk_megabytes: int = 24
+
+    # The disagreement loop is intentionally finite.  No provider may keep a
+    # sermon in an automatic retry cycle forever.
+    disagreement_retry_limit: int = 1
+    arbitration_limit: int = 1
+    artifacts_dir: Optional[Path] = None
+    reports_dir: Optional[Path] = None
+
 
 @dataclass
 class DataRepoConfig:
-    """Git data-repository settings."""
+    """Filesystem workspace supplied by the calling process or workflow.
 
-    url: Optional[str]   # from env DATA_REPO_URL
-    path: Path           # local clone path
-    branch: str
-    auto_push: bool
+    OctoScribe deliberately knows only the resolved local path.  Cloning,
+    committing, and publishing that path are responsibilities of the caller.
+    """
+
+    path: Path

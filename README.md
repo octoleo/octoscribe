@@ -1,606 +1,285 @@
 # OctoScribe
 
-OctoScribe is a Python 3.11+ CLI pipeline that collects audio files (sermons, devotions, or any voice recordings) that it has not seen before, transcribes them verbatim using AI, and stores both the audio and the transcriptions in a dedicated, version-controlled data repository. Every run ends with an automatic git commit and push so your archive is always up to date.
+OctoScribe is a GitHub Action for fidelity-first transcription of long-form
+audio such as sermons. It accepts audio from Telegram or an already-prepared
+folder, splits long recordings into deterministic overlapping chunks, runs one
+to three independent speech-to-text providers, and writes transcripts,
+comparison reports, raw candidates, and a persistent manifest to caller-owned
+workspace paths.
 
-Audio can come from two sources: a **Telegram group** (the default) or a **local folder** of files you already have on disk. In folder mode no Telegram credentials are required — see [Audio sources](#audio-sources).
+OctoScribe does **not** clone, commit, pull, or push repositories. The calling
+workflow owns Git authentication and publication. The recommended setup uses
+[`octoleo/git-user@v2`](https://github.com/octoleo/git-user) before cloning the
+audio and transcript repositories, then commits the action's output afterward.
+This keeps OctoScribe focused on one job: audio-to-text conversion.
 
-This README is a **getting-started guide** — everything you need to install, configure and run OctoScribe. If you want to understand *how it works internally* or *contribute to the code*, see the [Documentation](#documentation) section below.
+## Start with a workflow
 
----
+Choose one of the complete templates:
 
-## Table of Contents
+- [`examples/in-repository.yml`](examples/in-repository.yml) is the recommended
+  workflow when audio and text live in the repository where the workflow runs.
+  It uses the built-in `GITHUB_TOKEN`, stores `audio/`, `manifest.json`,
+  `transcriptions/`, `candidates/`, and `reports/` together, and requires no
+  `git-user` step or second data-repository checkout.
+- [`examples/full.yml`](examples/full.yml) is the recommended production
+  workflow. It supports split or shared repositories, Telegram or a prepared
+  folder, one to three providers, branch-aware clones, explicit audio revision
+  provenance, bounded concurrency, and verbose CI logs.
+- [`examples/minimal.yml`](examples/minimal.yml) is the smallest useful
+  one-provider workflow. It uses a shared data repository and one `run` action
+  call. It is simpler, but its transcript evidence cannot name a separately
+  committed source-audio revision; use the full workflow when provenance is
+  critical.
+- [`examples/pipeline.yml`](examples/pipeline.yml) is a complete scheduled and
+  manually dispatched operational workflow to copy into a consuming repository.
+  It follows the full two-stage pattern without activating that credentialed
+  pipeline inside the OctoScribe source repository.
 
-1. [Documentation](#documentation)
-2. [Prerequisites](#prerequisites)
-3. [Quick Start](#quick-start)
-4. [Configuration](#configuration)
-5. [Commands Reference](#commands-reference)
-6. [Data Repository](#data-repository)
-7. [Transcription Backends](#transcription-backends)
-8. [GitHub Actions Workflow](#github-actions-workflow)
-9. [Testing](#testing)
-10. [Project Structure](#project-structure)
+The production sequence is deliberately split between the action and its
+caller:
 
----
+```text
+caller: configure Git identity and clone worktrees
+action: download/import and hash audio; update manifest
+caller: commit and push exact audio bytes; capture revision and branch
+action: transcribe those bytes with the captured provenance
+caller: commit and push manifest, candidates, reports, and text
+```
 
-## Documentation
+In a shared repository, the first caller commit stages `audio/` together with
+the manifest checkpoint; the final commit stages transcript evidence and the
+updated manifest. In split mode, the caller checkpoints audio first, then the
+download-state manifest, and finally transcript evidence.
 
-| Document | What it is for |
+The in-repository template uses the workflow checkout itself as that shared
+workspace. A completed run leaves this durable layout:
+
+```text
+audio/             original source recordings
+manifest.json      persistent index; completed items are skipped on later runs
+transcriptions/    authoritative machine transcript text
+candidates/        raw responses retained from each provider
+reports/           comparison, discrepancy, hash, and provenance evidence
+```
+
+## GitHub configuration
+
+Store credentials in repository or organization **Secrets**. Store non-secret
+policy and repository names in **Variables**. The full example recognizes all
+of the following placeholders; only values needed by the selected source,
+layout, and providers are required.
+
+### Secrets
+
+| Name | Used for |
 | --- | --- |
-| **README** (this file) | How to **install, configure and run** OctoScribe. Start here. |
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | How OctoScribe **works under the hood** — the full execution path from command to commit, which classes and functions run at each stage, the different ways it can run, and the reasoning behind the design. Read this before changing the code. |
-| [`docs/TESTING.md`](docs/TESTING.md) | How the **test suite** is structured and run, and how to add to it. |
+| `SSH_KEY`, `SSH_PUB` | Cloning and pushing caller-owned repositories through `octoleo/git-user`. |
+| `GPG_KEY`, `GPG_USER` | Signing identity required by `octoleo/git-user@v2`. |
+| `GIT_USER`, `GIT_EMAIL` | Commit author configured by `octoleo/git-user`. |
+| `GIT_TOKEN` | Optional personal access token exposed by `octoleo/git-user` for caller-side GitHub CLI use. |
+| `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_PHONE`, `TELEGRAM_SESSION_B64` | Telegram source only. Treat the saved session like a password. |
+| `OPENAI_API_KEY` | Enables OpenAI transcription. This is the recommended primary/default provider. |
+| `XAI_API_KEY` | Enables xAI/Grok as an independent provider. |
+| `META_ASR_API_KEY` | Optional bearer token for a hosted Meta-compatible ASR endpoint. |
 
-New documentation belongs in the [`docs/`](docs/) folder; link to it from this table so it stays easy to find.
+### Variables
 
----
+| Name | Example | Purpose |
+| --- | --- | --- |
+| `REPOSITORY_LAYOUT` | `split` | `split` for separate audio/transcript repositories, or `shared`. |
+| `DATA_REPO_OWNER`, `DATA_REPO_NAME`, `DATA_REPO_BRANCH` | `your-org`, `sermon-data`, `main` | Shared-layout repository. |
+| `AUDIO_REPO_OWNER`, `AUDIO_REPO_NAME`, `AUDIO_REPO_BRANCH` | `your-org`, `sermon-audio`, `main` | Split-layout immutable audio repository. |
+| `TRANSCRIPT_REPO_OWNER`, `TRANSCRIPT_REPO_NAME`, `TRANSCRIPT_REPO_BRANCH` | `your-org`, `sermon-text`, `main` | Split-layout manifest, evidence, and text repository. |
+| `SOURCE_MODE` | `telegram` | `telegram` or `folder`. |
+| `TELEGRAM_GROUP` | `@sermon_archive` | Telegram group, channel, or numeric chat ID. |
+| `SOURCE_REPO_OWNER`, `SOURCE_REPO_NAME`, `SOURCE_REPO_BRANCH` | `your-org`, `incoming-audio`, `main` | Optional repository cloned by the full example when `SOURCE_MODE=folder`. |
+| `SOURCE_FOLDER` | `./prepared-source/audio` | Prepared folder passed to OctoScribe. |
+| `SSH_TYPE`, `SSH_HOST`, `GIT_USER_FORCE` | `ed25519`, `github.com`, `false` | Optional `octoleo/git-user` SSH and replacement policy. |
+| `OCTOSCRIBE_ASR_PROVIDERS` | `openai,xai,meta` | Ordered list of one to three providers. |
+| `OCTOSCRIBE_PRIMARY_ASR` | `openai` | Provider whose exact word surface is canonical. |
+| `TRANSCRIBE_MODEL`, `TRANSCRIBE_LANGUAGE` | `gpt-transcribe`, `en` | Primary transcription model and language hint. |
+| `XAI_BASE_URL` | `https://api.x.ai/v1/stt` | xAI STT URL; retain the official TLS endpoint. |
+| `META_ASR_URL`, `META_ASR_MODEL`, `META_ASR_LANGUAGE` | service URL, model ID, `eng_Latn` | Hosted Meta Omnilingual-compatible ASR service. |
+| `LOCAL_MODEL`, `LOCAL_DEVICE`, `LOCAL_COMPUTE_TYPE` | `large-v3`, `cpu`, `int8` | Hosted-runner Faster-Whisper defaults; a self-hosted GPU can override device/compute type. |
+| `OCTOSCRIBE_CONFIG_PATH`, `OCTOSCRIBE_VERBOSE` | `conf/octoscribe.ini`, `true` | Optional checked-out INI policy and debug-level logging. |
 
-## Prerequisites
+The GitHub UI may leave optional values unset. The full example supplies
+documented defaults without placing tokens in the workflow file.
 
-| Requirement | Notes |
-|---|---|
-| Python 3.11+ | Earlier versions are not supported. |
-| git 2.x | Required for data repository management. |
-| Telegram account | You need a real phone number. Bots cannot join groups as members. |
-| OpenAI API key | Required for the `openai` transcription backend. |
-| NVIDIA GPU (optional) | Required for the `local` Faster-Whisper backend at reasonable speed. |
+For Telegram CI, authenticate once in a trusted local environment and run
+`python octoscribe.py session export`. Store the resulting base64 value as the
+`TELEGRAM_SESSION_B64` secret. Do not paste session bytes into workflow YAML or
+commit the generated Telethon database.
 
----
+## Composite action inputs
 
-## Quick Start
+The action consumes existing local paths. It never interprets repository names
+or remote URLs.
 
-### 1. Clone the repository
+| Input | Meaning |
+| --- | --- |
+| `command` | `run`, `download`, `transcribe`, or `status`. Production provenance uses `download` followed by `transcribe`. |
+| `source` | `telegram` or `folder` for `run`/`download`. |
+| `source_folder` | Prepared input directory when `source=folder`. |
+| `telegram_api_id`, `telegram_api_hash`, `telegram_phone`, `telegram_session_b64`, `telegram_group` | Telegram source credentials and target. |
+| `openai_api_key`, `xai_api_key` | Provider credentials. |
+| `meta_asr_url`, `meta_asr_api_key`, `meta_asr_model`, `meta_asr_language` | Hosted Meta-compatible ASR configuration. |
+| `providers` | Ordered provider list: `openai`, `xai`, `meta`, and/or `whisper` (maximum three). |
+| `primary_provider` | Canonical provider; otherwise the first enabled provider. |
+| `transcribe_model`, `transcribe_language` | Main model and spoken-language hint. |
+| `xai_base_url` | xAI STT endpoint. |
+| `local_model`, `local_device`, `local_compute_type` | Optional Faster-Whisper runtime policy. |
+| `audio_repo_path`, `transcript_repo_path` | Existing caller worktrees for split layout; provide both. |
+| `data_repo_path` | Existing caller worktree for shared layout; do not combine with split paths. |
+| `audio_revision`, `audio_repository_branch` | Caller-captured source commit and branch added to transcript provenance. |
+| `config_path` | Optional INI file for advanced non-secret policy. |
+| `verbose` | `true` for debug-level CI logging. Secrets remain redacted. |
+
+The action also exposes `audio_dir`, `manifest_file`, `transcriptions_dir`,
+`candidates_dir`, and `reports_dir` outputs so a caller can archive, inspect, or
+selectively publish the generated paths without guessing the configured
+layout.
+
+All work is reported to standard output so GitHub Actions logs show source
+discovery, skips, hashes, chunk planning, provider attempts, comparisons,
+seams, output locations, and final state. Credentials and Telegram session
+bytes are never intentionally logged.
+
+## Persistent state and idempotence
+
+The caller must preserve the text/evidence worktree between runs by committing
+its output. Its `manifest.json` is the index that records source identity,
+SHA-256 hashes, acquisition state, transcript state, providers, output hashes,
+and quality results. On the next checkout, OctoScribe reads that index and
+skips content already completed. A terminal manifest state is skipped only when
+its recorded transcript is still a safe regular file and its SHA-256 still
+matches the manifest. A missing or changed output is re-queued, while an intact
+output never incurs another provider call. Folder imports use content hashes,
+so renaming the same source file does not make it new work.
+
+Telegram entries retain the established message/audio fields: message ID,
+date, title, performer, duration, formatted duration, extension, sanitized and
+original filenames, and the exact source SHA-256. Folder entries record the
+same common fields where available and use mutagen to collect safe embedded
+tags plus technical properties such as album, artist, composer, genre, track,
+bitrate, sample rate, channels, codec, MIME type, file size, and source modified
+time. Missing metadata remains `null`; it never blocks import or alters audio.
+
+After transcription, each entry's `transcription` object retains the legacy
+`output_file` and also records repository-relative `audio_path` and
+`output_path`, the transcript SHA-256, provider/model provenance, quality state,
+and evidence-report link. The manifest can therefore be used directly as the
+catalog joining every preserved recording to its published text and evidence.
+
+Recommended split layout:
+
+```text
+sermon-audio/
+└── audio/                         immutable source recordings
+
+sermon-text/
+├── manifest.json                  persistent index and provenance
+├── transcriptions/                canonical output
+│   └── needs-review/              unresolved output quarantine
+├── candidates/                    raw provider/chunk attempts
+└── reports/                       comparisons, seams, hashes, revision
+```
+
+Shared layout uses the same paths under one worktree. Never delete the manifest
+between runs unless intentionally rebuilding the index.
+
+## Fidelity model
+
+OctoScribe does not proofread, paraphrase, or generatively “clean up” sermons.
+The primary provider owns the canonical words; independent providers validate
+or dispute them but never silently replace them.
+
+| Providers | Bounded behavior | Successful machine state |
+| --- | --- | --- |
+| One | One transcription. | `machine_transcribed` |
+| Two | Independent transcription and comparison; retry both once on disagreement. | `cross_checked` only when normalized words agree; otherwise `needs_review`. |
+| Three | The first two compare and retry; the third is a one-time fallback checker or arbiter. | `cross_checked` only when an independent provider supports the primary; otherwise `needs_review`. |
+
+The automatic loop is finite. Comparison ignores superficial casing,
+punctuation, Unicode compatibility, and whitespace, while retaining original
+provider text unchanged in evidence. Negations, numbers, biblical names, and
+Scripture references remain visible in discrepancy reports.
+
+Long recordings—including 90-minute sermons—target eight-minute core chunks,
+with twelve seconds of audio overlap and a hard ten-minute request window.
+Boundaries move to nearby silence where possible. The same materialized chunk
+bytes go to every enabled provider. The overlapping ASR text is joined by a
+deterministic token alignment, not a generative editor, so seaming adds no
+provider cost and cannot silently rewrite wording. Only a proven duplicate
+prefix of at least six exact normalized tokens is removed; otherwise both sides
+remain and the recording becomes `needs_review`.
+
+Machine transcription cannot prove word-for-word identity with audio. Only a
+human listening comparison can produce `human_verified`; automation makes that
+review smaller and evidence-based.
+
+See [Architecture](docs/ARCHITECTURE.md) for the state machine and evidence
+model, and [Testing](docs/TESTING.md) for the validation contract.
+
+## Provider notes
+
+OpenAI `gpt-transcribe` is the recommended default. When `providers` is blank,
+credentials enable providers in OpenAI, xAI, then Meta order; the first enabled
+provider becomes primary. An explicit list remains available when exact
+selection matters. `META_ASR_URL` must serve an OpenAI-compatible transcription
+API; a text-only Llama or Ollama endpoint cannot transcribe audio. Local
+Faster-Whisper is optional, is not installed unless selected, and is generally
+less accurate than the recommended hosted primary for this use case.
+
+## Local use
+
+Local operation follows the same path semantics and does no Git publication.
 
 ```bash
 git clone https://github.com/octoleo/octoscribe.git
 cd octoscribe
-```
-
-### 2. Create and activate a virtual environment
-
-```bash
 python3.11 -m venv .venv
-source .venv/bin/activate   # Windows: .venv\Scripts\activate
-```
-
-### 3. Install dependencies
-
-```bash
+source .venv/bin/activate
 pip install -r requirements.txt
-```
-
-### 4. Obtain Telegram API credentials
-
-1. Visit [https://my.telegram.org](https://my.telegram.org) and log in with your phone number.
-2. Click **API development tools**.
-3. Create a new application. The name and platform do not affect functionality.
-4. Note your **App api_id** (an integer) and **App api_hash** (a hex string).
-
-### 5. Configure secrets
-
-```bash
 cp conf/.env.example .env
-```
-
-Open `.env` and fill in at minimum:
-
-```dotenv
-TELEGRAM_API_ID=12345678
-TELEGRAM_API_HASH=your_api_hash_here
-TELEGRAM_PHONE=+27821234567
-OPENAI_API_KEY=sk-proj-...          # omit if using the local backend
-DATA_REPO_URL=git@github.com:you/sermons-data.git   # optional but recommended
-```
-
-### 6. Configure runtime settings
-
-```bash
 cp conf/octoscribe.ini.example conf/octoscribe.ini
 ```
 
-Open `conf/octoscribe.ini` and set at minimum:
-
-```ini
-[telegram]
-group = @your_church_group
-```
-
-### 7. Authenticate with Telegram
-
-The first run opens an interactive prompt asking for the verification code sent to your phone (standard Telegram login). The session is saved in `.session/` and reused on all subsequent runs.
+Prepare existing directories, then run either a shared or split layout:
 
 ```bash
-python octoscribe.py status
+# Shared worktree, prepared folder, one provider
+python octoscribe.py --data-repo ./sermon-data \
+  run --folder ./incoming-audio --providers openai
+
+# Split production stages; capture the revision with your own Git tooling
+python octoscribe.py --audio-repo ./sermon-audio \
+  --transcript-repo ./sermon-text \
+  download --folder ./incoming-audio
+
+python octoscribe.py --audio-repo ./sermon-audio \
+  --transcript-repo ./sermon-text \
+  transcribe --providers openai,xai \
+  --audio-revision "$AUDIO_REVISION" \
+  --audio-repository-branch main
 ```
 
-### 8. Run the full pipeline
-
-```bash
-python octoscribe.py run
-```
-
-This will download any new audio files from the configured group, transcribe each one, write the results to the data repository, and push to the remote if `auto_push = true`.
-
----
-
-## Configuration
-
-OctoScribe separates secrets from settings deliberately.
-
-### Audio sources
-
-OctoScribe can acquire audio from one of two sources, selected by the
-`[source] mode` setting in `conf/octoscribe.ini` (or `--source` on the command
-line):
-
-| Mode | Where audio comes from | Telegram credentials |
-| --- | --- | --- |
-| `telegram` (default) | New audio messages in a Telegram group | Required |
-| `folder` | Audio files in a local folder | Not required |
-
-**Folder mode** is the simplest way to process sermons you already have on
-disk. Configure it in the INI file:
-
-```ini
-[source]
-mode = folder
-folder = ~/sermons/incoming
-recursive = true
-```
-
-…or entirely from the command line (passing `--folder` implies
-`--source folder`):
-
-```bash
-python octoscribe.py download --folder ~/sermons/incoming
-python octoscribe.py run --folder ~/sermons/incoming --backend local
-```
-
-In folder mode the importer copies every recognised audio file (`.mp3`, `.wav`,
-`.flac`, `.m4a`, `.aac`, `.ogg`, `.oga`, `.opus`) into the data repository's
-audio directory and queues it for transcription. Files are deduplicated by
-SHA-256 content hash, so re-running over the same folder will not import the
-same recording twice. The original files in your source folder are never
-modified or moved. Because no Telegram connection is involved, none of the
-`TELEGRAM_*` variables are needed — only an `OPENAI_API_KEY` (when
-`transcribe.backend = openai`).
-
-### `.env` — secrets only
-
-The `.env` file (copied from `conf/.env.example`) holds every credential:
-
-- Telegram API ID and hash
-- Telegram phone number
-- OpenAI API key
-- Anthropic API key (future use)
-- Data repository remote URL
-
-This file is listed in `.gitignore` and must never be committed. See `conf/.env.example` for full documentation of every variable.
-
-You can also export variables in your shell or pass them inline:
-
-```bash
-TELEGRAM_API_ID=12345678 TELEGRAM_API_HASH=abc123 python octoscribe.py run
-```
-
-### `conf/octoscribe.ini` — non-secret settings
-
-The INI file (copied from `conf/octoscribe.ini.example`) holds all non-sensitive runtime settings: which group to monitor, worker counts, retry behaviour, transcription model, data repository path, and directory layout. This file is also in `.gitignore` so that accidental system paths or group names are not leaked.
-
-Override either file's path at runtime:
-
-```bash
-OCTOSCRIBE_CONFIG=/path/to/other.ini OCTOSCRIBE_ENV=/path/to/other.env python octoscribe.py run
-```
-
-### Settings precedence
-
-Environment variables always win over the INI file. Explicitly set environment variables override `.env` file values.
-
----
-
-## Commands Reference
-
-All commands are subcommands of the single entry point `octoscribe.py`.
-
-```
-python octoscribe.py <command> [options]
-```
-
-### `run` — Full pipeline
-
-Download (or import) new audio, transcribe it, then commit and push the data repository.
-
-```bash
-python octoscribe.py run
-```
-
-This is the command you will schedule in cron or run manually after a service.
-
-Useful options:
-
-| Option | Effect |
-| --- | --- |
-| `--source telegram\|folder` | Force the audio source for this run. |
-| `--folder PATH` | Import from a local folder (implies `--source folder`). |
-| `--group GROUP` | Override the Telegram group (`@username` or numeric chat ID). |
-| `--backend openai\|local` | Override the transcription backend. |
-| `--dry-run` | List the files pending transcription and exit — no downloads, no API calls, no commits. |
-| `--no-push` | Run everything but skip the final `git push` (changes are still committed locally). |
-
-### `download` — Acquire audio only
-
-Fetch new audio files into the data repository without transcribing. The source
-depends on `[source] mode` — a Telegram group by default, or a local folder:
-
-```bash
-# From the configured Telegram group
-python octoscribe.py download
-
-# From a local folder (implies --source folder)
-python octoscribe.py download --folder ~/sermons/incoming
-```
-
-Useful for bulk acquisition when you want to transcribe later, or to test
-connectivity.
-
-### `transcribe` — Transcribe only
-
-Transcribe audio files that are in the data repository but do not yet have a transcription.
-
-```bash
-python octoscribe.py transcribe
-
-# Preview what would be transcribed, without calling any backend
-python octoscribe.py transcribe --dry-run
-
-# Re-transcribe with a different backend
-python octoscribe.py transcribe --backend local
-```
-
-Useful after switching backends (e.g. re-transcribing existing audio with a better model).
-
-### `sync` — Commit and push data repository
-
-Pull the latest data repository state, then commit any changes and push to the remote.
-
-```bash
-python octoscribe.py sync
-
-# Pull only (don't commit or push)
-python octoscribe.py sync --pull-only
-
-# Commit and push only (don't pull first)
-python octoscribe.py sync --push-only
-```
-
-### `status` — Pipeline status
-
-Print a read-only summary: the active audio source, the data repository path/branch/remote, whether there are uncommitted changes, and manifest counts (total, downloaded, transcribed, failed, pending transcription).
-
-```bash
-python octoscribe.py status
-```
-
-### `debug` — Telegram diagnostics
-
-Connect to Telegram and print full metadata for the first few audio messages in the configured group (message id, MIME type, attributes, and the values OctoScribe extracts from them).
-
-```bash
-python octoscribe.py debug
-
-# Inspect more messages (default is 3)
-python octoscribe.py debug --scan-limit 10
-```
-
-Use this to find a private group's numeric chat ID or to troubleshoot why a message is or isn't detected as audio.
-
-### `session` — Manage Telegram session files
-
-#### `session check` — Inspect local session
-
-```bash
-python octoscribe.py session check
-```
-
-Shows whether a session file exists, its size, and last-modified time.
-
-#### `session export` — Export session for CI/CD
-
-```bash
-python octoscribe.py session export
-```
-
-Prints the base64-encoded session file to stdout. Use the output to populate the `TELEGRAM_SESSION_B64` GitHub Secret so GitHub Actions can authenticate without interactive prompts.
-
-### `ci-export` — Print all CI/CD secrets and variables
-
-```bash
-python octoscribe.py ci-export
-```
-
-Prints every secret and variable you need to configure a CI/CD pipeline (including the base64 session), formatted for copying into your repository's Secrets and Variables. **Local use only** — it refuses to run inside a CI environment so secrets never end up in build logs.
-
----
-
-## CI/CD: Setting up TELEGRAM_SESSION_B64
-
-GitHub Actions cannot prompt for a Telegram verification code. The solution is to authenticate once on your local machine, export the session file, and store it as a repository secret.
-
-**Step 1 — Authenticate locally (once)**
-
-```bash
-python octoscribe.py download
-```
-
-Telethon will prompt for the verification code sent to your phone. Complete the login. The session is saved to the path shown in `session check`.
-
-**Step 2 — Export the session**
-
-```bash
-python octoscribe.py session export
-```
-
-Copy the entire output string (it will be a long base64 line with no spaces or newlines).
-
-**Step 3 — Store as a GitHub Secret**
-
-In your repository go to **Settings → Secrets and variables → Actions → New repository secret**:
-
-- Name: `TELEGRAM_SESSION_B64`
-- Value: paste the output from Step 2
-
-**Step 4 — Done**
-
-On every workflow run, OctoScribe decodes this secret back into a `.session` file before any Telegram requests are made, so Telethon starts already authenticated. (See [the architecture doc](docs/ARCHITECTURE.md#how-non-interactive-auth-works-in-ci) for exactly when and where this happens.) No interactive authentication is needed.
-
-> **Important:** If you ever regenerate your Telegram session (e.g. after logging out or revoking API access), repeat Steps 1–3 to update the secret.
-
----
-
-## Data Repository
-
-### What it is
-
-The data repository is a plain git repository that holds:
-
-```
-~/.octoscribe/data/       (default location)
-  audio/                  downloaded .ogg / .mp3 / .m4a files
-  transcriptions/         one .txt file per audio file (verbatim transcript)
-  manifest.json           index mapping Telegram message IDs to files and metadata
-```
-
-It is intentionally separate from the OctoScribe source code repository. Audio files are large binary assets that do not belong in a source tree, and keeping them separate means the code repository stays small and fast.
-
-### Setting it up
-
-**Option A — Use an existing remote repository**
-
-Create an empty repository on GitHub, GitLab, or any git host, then set `DATA_REPO_URL` in your `.env`. OctoScribe will initialise the local repository at the configured `path` (default `~/.octoscribe/data`) on first run and wire up the remote automatically.
-
-**Option B — Local only**
-
-Leave `DATA_REPO_URL` unset and set `auto_push = false` in `conf/octoscribe.ini`. The data repository will still be a git repo (for local history), it just will not push anywhere.
-
-### Why git for data?
-
-- Every run creates an auditable commit showing exactly what was added.
-- Audio and transcriptions can be recovered from any point in history.
-- The remote acts as an off-site backup with zero extra infrastructure.
-- Team members can clone the data repo independently of the code repo.
-
----
-
-## Transcription Backends
-
-OctoScribe transcribes verbatim — no summarisation, no paraphrasing, no correction of perceived errors. The transcript is a faithful record of exactly what was said.
-
-### OpenAI (`backend = openai`)
-
-Uses the `gpt-4o-transcribe` model via the OpenAI API.
-
-**Pros:** Excellent accuracy, handles accents and domain-specific vocabulary well, no local hardware required, parallelises easily.
-
-**Cons:** Costs money (billed per minute of audio), requires an internet connection and an OpenAI account, audio is sent to OpenAI's servers.
-
-**Required:** `OPENAI_API_KEY` in `.env`.
-
-**Recommended for:** Most users. The cost per sermon is typically a few cents.
-
-### Local Faster-Whisper (`backend = local`)
-
-Runs the `large-v3` Whisper model locally using the CTranslate2 runtime.
-
-**Pros:** Free after hardware cost, audio never leaves your machine, works offline.
-
-**Cons:** Requires a CUDA-capable NVIDIA GPU for practical throughput (CPU inference is extremely slow for `large-v3`). Requires CUDA drivers and libraries to be installed correctly.
-
-**Recommended for:** Users with a suitable GPU who have privacy concerns or process very large volumes.
-
-### Choosing a backend
-
-| | OpenAI | Local |
-|---|---|---|
-| Accuracy | Excellent | Excellent (large-v3) |
-| Cost | ~$0.006/min | Hardware only |
-| Speed | Fast (API, parallelised) | Fast with GPU, slow on CPU |
-| Privacy | Audio sent to OpenAI | Audio stays local |
-| Setup complexity | Low | Medium–High |
-
----
-
-## GitHub Actions Workflow
-
-OctoScribe ships with a composite GitHub Action (`action.yml` at the repository root) that you can drop into any workflow as `octoleo/octoscribe@v1`. The action installs Python, installs OctoScribe's dependencies, and runs the pipeline against a pre-cloned data repository.
-
-A complete reference workflow lives at [`.github/workflows/pipeline.yml`](.github/workflows/pipeline.yml) — copy it into your own repository, replace the secrets and variables, and you have a fully scheduled archive pipeline.
-
-### Required companion action: `octoleo/git-user@v2`
-
-The OctoScribe pipeline writes commits and pushes them to the data repository. Before `octoleo/octoscribe@v1` runs, the workflow **must** configure a git identity, an SSH key (so the data-repo clone and push succeed over `git@github.com`), and optionally a GPG key for signed commits. That configuration is provided by [`octoleo/git-user@v2`](https://github.com/octoleo/git-user).
-
-`octoleo/git-user@v2` is what makes `git clone git@github.com:...` and `git push` work non-interactively inside the runner — without it, OctoScribe will fail to clone the data repository and will not be able to push the new audio and transcriptions back.
-
-### Required secrets and variables
-
-Configure these in **Settings → Secrets and variables → Actions** in the repository that hosts your workflow.
-
-**Secrets** (under *Repository secrets*):
-
-| Secret | Used by | Description |
-|---|---|---|
-| `GPG_KEY` | `octoleo/git-user@v2` | ASCII-armoured private GPG key for signed commits. |
-| `GPG_USER` | `octoleo/git-user@v2` | Email address associated with the GPG key. |
-| `SSH_KEY` | `octoleo/git-user@v2` | Private SSH key authorised to push to the data repository. |
-| `SSH_PUB` | `octoleo/git-user@v2` | Matching public SSH key. |
-| `GIT_USER` | `octoleo/git-user@v2` | Display name for git commits (e.g. `OctoScribe Bot`). |
-| `GIT_EMAIL` | `octoleo/git-user@v2` | Email address for git commits. |
-| `TELEGRAM_API_ID` | `octoleo/octoscribe@v1` | Telegram API ID from [my.telegram.org](https://my.telegram.org). |
-| `TELEGRAM_API_HASH` | `octoleo/octoscribe@v1` | Telegram API hash from [my.telegram.org](https://my.telegram.org). |
-| `TELEGRAM_PHONE` | `octoleo/octoscribe@v1` | Phone number for the Telegram account, with country code. |
-| `TELEGRAM_SESSION_B64` | `octoleo/octoscribe@v1` | Base64-encoded session file produced by `python octoscribe.py session export`. See [CI/CD: Setting up TELEGRAM_SESSION_B64](#cicd-setting-up-telegram_session_b64). |
-| `OPENAI_API_KEY` | `octoleo/octoscribe@v1` | OpenAI API key. Required only when `transcribe_backend` is `openai`. |
-
-**Variables** (under *Repository variables*):
-
-| Variable | Description |
-|---|---|
-| `DATA_REPO_ORG` | GitHub org/user that owns the data repository (e.g. `your-org`). |
-| `DATA_REPO_NAME` | Name of the data repository (e.g. `sermons-data`). |
-| `TELEGRAM_GROUP` | Group to archive — `@username` or numeric chat ID. |
-| `TRANSCRIBE_BACKEND` | Optional — `openai` (default) or `local`. |
-
-### Minimal example workflow
-
-```yaml
-name: OctoScribe Pipeline
-
-on:
-  schedule:
-    - cron: '0 6 * * 1'   # Mondays at 06:00 UTC
-  workflow_dispatch:
-
-jobs:
-  build:
-    name: Run Pipeline
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Setup GitHub User Details
-        uses: octoleo/git-user@v2
-        with:
-          gpg-key:   ${{ secrets.GPG_KEY }}
-          gpg-user:  ${{ secrets.GPG_USER }}
-          ssh-key:   ${{ secrets.SSH_KEY }}
-          ssh-pub:   ${{ secrets.SSH_PUB }}
-          git-user:  ${{ secrets.GIT_USER }}
-          git-email: ${{ secrets.GIT_EMAIL }}
-
-      - name: Clone Data Repository
-        run: |
-          /bin/git clone git@github.com:${{ vars.DATA_REPO_ORG }}/${{ vars.DATA_REPO_NAME }}.git ./data
-
-      - name: Run OctoScribe
-        uses: octoleo/octoscribe@v1
-        with:
-          telegram_api_id:      ${{ secrets.TELEGRAM_API_ID }}
-          telegram_api_hash:    ${{ secrets.TELEGRAM_API_HASH }}
-          telegram_phone:       ${{ secrets.TELEGRAM_PHONE }}
-          telegram_session_b64: ${{ secrets.TELEGRAM_SESSION_B64 }}
-          telegram_group:       ${{ vars.TELEGRAM_GROUP }}
-          openai_api_key:       ${{ secrets.OPENAI_API_KEY }}
-          data_repo_path:       ./data
-          transcribe_backend:   ${{ vars.TRANSCRIBE_BACKEND || 'openai' }}
-          command:              run
-```
-
-### Action inputs
-
-`octoleo/octoscribe@v1` accepts the following inputs (full schema in [`action.yml`](action.yml)):
-
-| Input | Required | Default | Description |
-|---|---|---|---|
-| `telegram_api_id` | yes | — | Telegram API ID. |
-| `telegram_api_hash` | yes | — | Telegram API hash. |
-| `telegram_phone` | yes | — | Telegram phone number with country code. |
-| `telegram_session_b64` | yes | — | Base64-encoded `.session` file for non-interactive auth. |
-| `telegram_group` | yes | — | `@username` or numeric chat ID of the group to archive. |
-| `openai_api_key` | no | `''` | OpenAI key. Required when `transcribe_backend=openai`. |
-| `data_repo_path` | no | `./data` | Local path to the pre-cloned data repository. |
-| `transcribe_backend` | no | `openai` | `openai` or `local`. |
-| `command` | no | `run` | One of `run`, `download`, `transcribe`, `sync`, `status`. |
-| `no_push` | no | `false` | `true` to skip the final `git push` (dry-run). |
-| `config_path` | no | `''` | Path to a custom `octoscribe.ini`. |
-| `verbose` | no | `false` | `true` enables debug logging. |
-
-### Pipeline order matters
-
-The three steps run in a specific order for a reason:
-
-1. **`octoleo/git-user@v2`** — installs the SSH key, GPG key, and `git config` so subsequent git operations succeed.
-2. **Clone data repository** — uses the SSH key from step 1 to clone the data repo into `./data`. OctoScribe expects the data repo to already exist on disk.
-3. **`octoleo/octoscribe@v1`** — runs the pipeline against the cloned data repo and uses the git identity from step 1 to commit and push results.
-
-Skipping or reordering any of these will cause the pipeline to fail (no SSH key → clone fails; no git identity → commit fails; no cloned data repo → OctoScribe has nowhere to write).
-
----
-
-## Testing
-
-OctoScribe uses [pytest](https://pytest.org) with asyncio and mock support. The whole suite is hermetic — it mocks Telethon, OpenAI and Faster-Whisper, so it needs no network, credentials or GPU and runs in well under a second.
-
-```bash
-# Run the full suite
-pytest
-
-# With coverage
-pytest --cov=src --cov-report=html
-open htmlcov/index.html
-
-# A single file, or a single test
-pytest tests/test_transcribe.py
-pytest tests/test_transcribe.py::test_openai_backend_retries_on_rate_limit
-```
-
-For the full picture — what each test file covers, the shared fixtures, and how each external service is mocked — see **[`docs/TESTING.md`](docs/TESTING.md)**.
-
----
-
-## Project Structure
-
-At a glance:
-
-```
-octoscribe/
-|-- octoscribe.py     CLI entry point: parses subcommands and wires the pipeline.
-|-- conf/             .env.example and octoscribe.ini.example templates.
-|-- src/              All the implementation: config, audio sources, transcription,
-|                     the manifest, and the data-repository git wrapper.
-|-- tests/            The pytest suite (everything external is mocked).
-|-- docs/             ARCHITECTURE.md and TESTING.md.
-|-- action.yml        Composite GitHub Action wrapper.
-|-- requirements.txt  Python dependencies with minimum version pins.
-```
-
-For a full, annotated module map — every file in `src/`, what it is responsible for, and how the pieces depend on each other — see the [**Module map** in `docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#module-map--what-lives-where).
-
----
-
-## Security Notes
-
-- **Never commit `.env`** — it is in `.gitignore`, but be careful with `git add -A`.
-- **Never commit `conf/octoscribe.ini`** — it is also in `.gitignore`.
-- **Session files** in `.session/` are equivalent to your Telegram password. Back them up securely and never share them.
-- **The data repository** may contain sensitive audio recordings. Consider whether the remote should be private.
-- If your `TELEGRAM_API_ID` / `TELEGRAM_API_HASH` are ever compromised, revoke them immediately at [https://my.telegram.org](https://my.telegram.org) under **API development tools**.
+Install `requirements-local.txt` only when selecting the `whisper` provider.
+Run `python -m pytest` after installing `requirements-dev.txt` to validate the
+project.
+
+## Security
+
+- Put all tokens and session data in GitHub Secrets or local environment
+  variables, never in INI files, manifests, or evidence repositories.
+- Keep sensitive sermon audio and transcripts in appropriately protected
+  repositories.
+- Use HTTPS for remote Meta endpoints; loopback HTTP is intended only for local
+  services.
+- Review every `needs_review` transcript against the original audio before
+  promoting it to a human-verified artifact.
 
 ## License
 
-```text
-Copyright (C) 2021-2026
-Llewellyn van der Merwe
-
-Licensed under the GNU General Public License v2 (GPLv2)
-See LICENSE for details.
-```
+See [LICENSE](LICENSE).

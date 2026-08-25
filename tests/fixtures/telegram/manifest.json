@@ -1,0 +1,28 @@
+{
+  "856": {
+    "date": "2024-11-25",
+    "downloaded": true,
+    "duration": 1412,
+    "duration_formatted": "23:32",
+    "extension": ".ogg",
+    "filename": "1 Timothy 15-6.ogg",
+    "hash": "7b2bc9c89b96cc528cd3f63a88e63710e2128516dae1079f4fabf8414cd8b060",
+    "original_filename": "record.ogg",
+    "performer": "Family Devotions",
+    "telegram_msg_id": 856,
+    "title": "1 Timothy 1:5-6"
+  },
+  "990": {
+    "date": "2025-02-06",
+    "downloaded": true,
+    "duration": 1850,
+    "duration_formatted": "30:50",
+    "extension": ".ogg",
+    "filename": "1 John 17-8.ogg",
+    "hash": "698056c50804e1033b1c68adcbf7d4064c32f112aaa6aba23f0fbe524472849a",
+    "original_filename": "record.ogg",
+    "performer": "Family Devotions",
+    "telegram_msg_id": 990,
+    "title": "1 John 1:7-8"
+  }
+}

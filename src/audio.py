@@ -77,11 +77,35 @@ def unique_filepath(directory: Path, filename: str, discriminator: str | int) ->
     """
     Return a path that does not yet exist in *directory*.
 
-    If *filename* is already taken, *discriminator* (e.g. a message ID or a
-    short content hash) is appended to the stem to keep the name unique.
+    If *filename* is already taken, a filesystem-safe form of *discriminator*
+    (e.g. a message ID or a short content hash) is appended to the stem.  If
+    that fallback is also occupied, a monotonically increasing counter is
+    added.  Existing files, directories, and even broken symlinks are never
+    returned to a caller that will atomically publish new evidence.
     """
+    relative = Path(filename)
+    if not filename or relative.is_absolute() or relative.name != filename:
+        raise ValueError("filename must be one safe path component")
+
+    def occupied(path: Path) -> bool:
+        return path.exists() or path.is_symlink()
+
     candidate = directory / filename
-    if not candidate.exists():
+    if not occupied(candidate):
         return candidate
+
     stem, ext = os.path.splitext(filename)
-    return directory / f"{stem}_{discriminator}{ext}"
+    raw_discriminator = str(discriminator)
+    safe_discriminator = sanitize_filename(raw_discriminator)[:48]
+    if not safe_discriminator:
+        safe_discriminator = hashlib.sha256(
+            raw_discriminator.encode("utf-8")
+        ).hexdigest()[:12]
+
+    fallback_stem = f"{stem}_{safe_discriminator}"
+    candidate = directory / f"{fallback_stem}{ext}"
+    counter = 2
+    while occupied(candidate):
+        candidate = directory / f"{fallback_stem}_{counter}{ext}"
+        counter += 1
+    return candidate

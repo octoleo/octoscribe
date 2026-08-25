@@ -1,8 +1,9 @@
 """
 manifest.py — Thread-safe manager for manifest.json.
 
-Tracks download and transcription status per Telegram message ID.
-The manifest lives in the data repository and is version-controlled.
+Tracks acquisition and transcription status for Telegram and folder sources.
+The manifest lives in the caller-supplied evidence workspace so the calling
+workflow can preserve it between runs.
 """
 
 from __future__ import annotations
@@ -16,12 +17,26 @@ from typing import Any
 from src.persistence import atomic_write_text
 
 
+_TERMINAL_TRANSCRIPTION_STATES = frozenset(
+    {
+        "completed",  # legacy manifests
+        "machine_transcribed",
+        "cross_checked",
+        "needs_review",
+        "human_verified",
+    }
+)
+
+_FAILURE_MARKER_KEYS = ("failed_stage", "failed_error", "failed_at", "error")
+_ACQUISITION_FAILURE_STAGES = frozenset({"download", "import"})
+
+
 class Manifest:
     """
     Thread-safe manager for manifest.json.
 
-    Tracks download and transcription status per Telegram message ID.
-    Lives in the data repository (version-controlled).
+    Tracks acquisition and transcription state for every source item.  It
+    lives in the caller-supplied text/evidence workspace.
 
     All mutation methods are protected by a threading.Lock. Writes are
     atomic (written to a .tmp file then renamed) to prevent corruption on
@@ -53,6 +68,12 @@ class Manifest:
         """Return the current UTC time as an ISO-8601 string."""
         return datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+    @staticmethod
+    def _clear_failure_markers(entry: dict[str, Any]) -> None:
+        """Remove the top-level marker for a failure that has been recovered."""
+        for key in _FAILURE_MARKER_KEYS:
+            entry.pop(key, None)
+
     # ------------------------------------------------------------------
     # Query methods (read-only, no lock required for individual reads
     # because CPython's GIL keeps dict lookups atomic, but we acquire the
@@ -68,7 +89,7 @@ class Manifest:
             return bool(entry.get("downloaded")) and bool(entry.get("filename"))
 
     def is_transcribed(self, msg_id: str | int) -> bool:
-        """Return True when transcription.status == 'completed'."""
+        """Return True once automation has reached a terminal quality state."""
         with self._lock:
             entry = self._data.get(self._str_id(msg_id))
             if entry is None:
@@ -76,7 +97,7 @@ class Manifest:
             transcription = entry.get("transcription")
             if not isinstance(transcription, dict):
                 return False
-            return transcription.get("status") == "completed"
+            return transcription.get("status") in _TERMINAL_TRANSCRIPTION_STATES
 
     def get_entry(self, msg_id: str | int) -> dict[str, Any] | None:
         """Return a shallow copy of the entry, or None if not present."""
@@ -106,15 +127,46 @@ class Manifest:
             entry.update(metadata)
             entry["downloaded"] = True
             entry["telegram_msg_id"] = int(key) if key.isdigit() else key
+            # A successful acquisition retry resolves a previous download or
+            # folder-import failure.  Do not hide an unrelated transcription
+            # failure merely because the source was seen again.
+            failed_stage = entry.get("failed_stage")
+            legacy_failure = failed_stage is None and any(
+                marker in entry for marker in _FAILURE_MARKER_KEYS
+            )
+            if failed_stage in _ACQUISITION_FAILURE_STAGES or legacy_failure:
+                self._clear_failure_markers(entry)
+            self._data[key] = entry
+
+    def record_audio_hash(self, msg_id: str | int, sha256: str) -> None:
+        """Backfill or verify the immutable source hash before transcription."""
+        if (
+            not isinstance(sha256, str)
+            or len(sha256) != 64
+            or any(character not in "0123456789abcdef" for character in sha256)
+        ):
+            raise ValueError("audio hash must be a lower-case SHA-256 digest")
+        key = self._str_id(msg_id)
+        with self._lock:
+            entry = self._data.get(key)
+            if entry is None:
+                raise KeyError(f"no manifest entry exists for {key}")
+            existing = entry.get("hash")
+            if isinstance(existing, str) and len(existing) == 64 and existing != sha256:
+                raise ValueError(
+                    f"audio SHA-256 mismatch for {key}; source evidence changed"
+                )
+            entry["hash"] = sha256
             self._data[key] = entry
 
     def mark_transcribed(self, msg_id: str | int, result: dict[str, Any]) -> None:
         """
         Record that an audio file has been transcribed.
 
-        *result* should contain: output_file, model. A completed_at
-        timestamp is added automatically if not already present in result.
-        The transcription sub-dict is set to status='completed'.
+        *result* should contain: output_file, output_path, audio_path, and model.
+        A completed_at timestamp is added automatically if not already present.
+        New callers should provide ``quality_state``.  Legacy callers that do
+        not provide it retain status='completed' for backwards compatibility.
         """
         key = self._str_id(msg_id)
         with self._lock:
@@ -122,10 +174,20 @@ class Manifest:
             if entry is None:
                 entry = {"telegram_msg_id": int(key) if key.isdigit() else key}
             transcription = dict(result)
-            transcription["status"] = "completed"
+            quality_state = transcription.get("quality_state")
+            if quality_state is not None and quality_state not in (
+                _TERMINAL_TRANSCRIPTION_STATES - {"completed"}
+            ):
+                raise ValueError(f"unknown transcription quality state: {quality_state!r}")
+            transcription["status"] = quality_state or "completed"
+            for marker in _FAILURE_MARKER_KEYS:
+                transcription.pop(marker, None)
             if "completed_at" not in transcription:
                 transcription["completed_at"] = self._now_iso()
             entry["transcription"] = transcription
+            # A terminal transcription supersedes any stale failure on this
+            # item, including failures recorded by older manifest versions.
+            self._clear_failure_markers(entry)
             self._data[key] = entry
 
     def mark_failed(self, msg_id: str | int, stage: str, error: str) -> None:
@@ -171,17 +233,24 @@ class Manifest:
             ]
 
     def pending_transcription(self) -> list[dict[str, Any]]:
-        """Return entries that have been downloaded but not yet transcribed."""
+        """Return unique downloaded recordings not yet transcribed.
+
+        Telegram content duplicates remain first-class manifest entries so
+        their message IDs are not downloaded again, but only the canonical
+        recording is eligible for a paid transcription call.
+        """
         with self._lock:
             result: list[dict[str, Any]] = []
             for entry in self._data.values():
                 downloaded = bool(entry.get("downloaded")) and bool(entry.get("filename"))
                 if not downloaded:
                     continue
+                if entry.get("duplicate") is True:
+                    continue
                 transcription = entry.get("transcription")
                 transcribed = (
                     isinstance(transcription, dict)
-                    and transcription.get("status") == "completed"
+                    and transcription.get("status") in _TERMINAL_TRANSCRIPTION_STATES
                 )
                 if not transcribed:
                     result.append(dict(entry))
@@ -200,7 +269,7 @@ class Manifest:
                 1
                 for v in self._data.values()
                 if isinstance(v.get("transcription"), dict)
-                and v["transcription"].get("status") == "completed"
+                and v["transcription"].get("status") in _TERMINAL_TRANSCRIPTION_STATES
             )
             failed = sum(1 for v in self._data.values() if "failed_stage" in v)
             return {
@@ -209,6 +278,47 @@ class Manifest:
                 "transcribed": transcribed,
                 "failed": failed,
             }
+
+    def quality_stats(self) -> dict[str, int]:
+        """Return counts for truthful quality states without changing stats()."""
+        with self._lock:
+            result = {
+                "machine_transcribed": 0,
+                "cross_checked": 0,
+                "needs_review": 0,
+                "human_verified": 0,
+                "legacy_completed": 0,
+            }
+            for entry in self._data.values():
+                transcription = entry.get("transcription")
+                if not isinstance(transcription, dict):
+                    continue
+                state = transcription.get("status")
+                key = "legacy_completed" if state == "completed" else state
+                if key in result:
+                    result[key] += 1
+            return result
+
+    def mark_human_verified(
+        self,
+        msg_id: str | int,
+        *,
+        reviewer: str | None = None,
+    ) -> None:
+        """Record explicit human comparison against the source audio."""
+        key = self._str_id(msg_id)
+        with self._lock:
+            entry = self._data.get(key)
+            if entry is None or not isinstance(entry.get("transcription"), dict):
+                raise KeyError(f"no transcription exists for {key}")
+            transcription = dict(entry["transcription"])
+            transcription["status"] = "human_verified"
+            transcription["quality_state"] = "human_verified"
+            transcription["human_verified_at"] = self._now_iso()
+            if reviewer:
+                transcription["human_verified_by"] = reviewer
+            entry["transcription"] = transcription
+            self._data[key] = entry
 
     # ------------------------------------------------------------------
     # Persistence

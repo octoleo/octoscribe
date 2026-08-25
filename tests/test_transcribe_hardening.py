@@ -15,6 +15,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
+
 from src.transcribe import TranscriptionBackend, Transcriber
 
 
@@ -98,3 +100,44 @@ def test_empty_transcript_is_failure(tmp_path: Path) -> None:
     # No empty file should have been written.
     out_dir = config.transcribe.transcriptions_dir
     assert not any(out_dir.iterdir()) if out_dir.exists() else True
+
+
+@pytest.mark.parametrize(
+    "filename",
+    ["../secret.mp3", "/etc/passwd.mp3", "nested/sermon.mp3", "secret.env"],
+)
+def test_tampered_manifest_path_is_never_uploaded(
+    tmp_path: Path, filename: str
+) -> None:
+    config = _make_config(tmp_path)
+    manifest = _make_manifest(
+        [{"telegram_msg_id": "10", "filename": filename, "title": None}]
+    )
+    backend = MagicMock(spec=TranscriptionBackend)
+    backend.name = "openai"
+
+    stats = Transcriber(config, manifest, backend=backend).run()
+
+    assert stats.failed == 1
+    backend.transcribe.assert_not_called()
+    manifest.mark_failed.assert_called_once()
+
+
+def test_symlinked_manifest_audio_is_never_uploaded(tmp_path: Path) -> None:
+    config = _make_config(tmp_path)
+    audio_dir = config.download.audio_dir
+    audio_dir.mkdir(parents=True)
+    outside = tmp_path / "private.mp3"
+    outside.write_bytes(b"PRIVATE")
+    (audio_dir / "sermon.mp3").symlink_to(outside)
+    manifest = _make_manifest(
+        [{"telegram_msg_id": "11", "filename": "sermon.mp3", "title": None}]
+    )
+    backend = MagicMock(spec=TranscriptionBackend)
+    backend.name = "openai"
+
+    stats = Transcriber(config, manifest, backend=backend).run()
+
+    assert stats.failed == 1
+    backend.transcribe.assert_not_called()
+    manifest.mark_failed.assert_called_once()

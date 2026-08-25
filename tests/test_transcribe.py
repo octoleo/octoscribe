@@ -7,6 +7,7 @@ Run with:
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 from pathlib import Path
@@ -29,6 +30,7 @@ from src.transcribe import (
     Transcriber,
     _normalize_text,
 )
+from src.manifest import Manifest
 
 
 # ---------------------------------------------------------------------------
@@ -39,7 +41,7 @@ def _make_transcribe_config(tmp_path: Path, **overrides):
     """Build a minimal TranscribeConfig-like namespace for tests."""
     defaults = dict(
         backend="openai",
-        model="gpt-4o-transcribe",
+        model="gpt-transcribe",
         language="en",
         workers=1,
         retry_attempts=2,
@@ -134,6 +136,26 @@ def test_openai_backend_name(tmp_path: Path):
     assert backend.name == "openai"
 
 
+def test_openai_backend_configures_provider_timeout(tmp_path: Path):
+    cfg = _make_transcribe_config(tmp_path, provider_timeout_seconds=42)
+    mock_openai = MagicMock()
+    with patch.dict(sys.modules, {"openai": mock_openai}):
+        OpenAIBackend(cfg)
+    mock_openai.OpenAI.assert_called_once_with(
+        api_key="sk-test", timeout=42.0, max_retries=0
+    )
+
+
+def test_openai_backend_rejects_diarization_model(tmp_path: Path):
+    cfg = _make_transcribe_config(
+        tmp_path,
+        model="gpt-4o-transcribe-diarize",
+    )
+
+    with pytest.raises(ValueError, match="diarization models are not supported"):
+        _make_openai_backend(cfg)
+
+
 # ---------------------------------------------------------------------------
 # 3. LocalWhisperBackend.name returns "local"
 # ---------------------------------------------------------------------------
@@ -191,7 +213,9 @@ def test_openai_backend_transcribe_calls_api(tmp_path: Path):
     audio_file = _make_audio_file(tmp_path)
 
     mock_client = MagicMock()
-    mock_client.audio.transcriptions.create.return_value = "Hello world."
+    mock_client.audio.transcriptions.create.return_value = SimpleNamespace(
+        text="Hello world."
+    )
 
     backend = _make_openai_backend(cfg, mock_client)
     result = backend.transcribe(audio_file)
@@ -202,7 +226,41 @@ def test_openai_backend_transcribe_calls_api(tmp_path: Path):
     assert kwargs["model"] == "gpt-4o-transcribe"
     assert kwargs["language"] == "af"
     assert kwargs["prompt"] == VERBATIM_PROMPT
+    assert "response_format" not in kwargs
+
+
+def test_openai_backend_whisper_uses_supported_text_format(tmp_path: Path):
+    cfg = _make_transcribe_config(tmp_path, model="whisper-1", language="en")
+    audio_file = _make_audio_file(tmp_path)
+    mock_client = MagicMock()
+    mock_client.audio.transcriptions.create.return_value = "Legacy transcript."
+
+    result = _make_openai_backend(cfg, mock_client).transcribe(audio_file)
+
+    assert result == "Legacy transcript."
+    kwargs = mock_client.audio.transcriptions.create.call_args.kwargs
+    assert kwargs["model"] == "whisper-1"
+    assert kwargs["language"] == "en"
     assert kwargs["response_format"] == "text"
+
+
+def test_openai_backend_uses_current_gpt_transcribe_contract(tmp_path: Path):
+    cfg = _make_transcribe_config(tmp_path, model="gpt-transcribe", language="en")
+    audio_file = _make_audio_file(tmp_path)
+    mock_client = MagicMock()
+    mock_client.audio.transcriptions.create.return_value = SimpleNamespace(
+        text="Exact current transcript."
+    )
+
+    result = _make_openai_backend(cfg, mock_client).transcribe(audio_file)
+
+    assert result == "Exact current transcript."
+    kwargs = mock_client.audio.transcriptions.create.call_args.kwargs
+    assert kwargs["model"] == "gpt-transcribe"
+    assert kwargs["extra_body"] == {"languages": ["en"]}
+    assert kwargs["prompt"] == VERBATIM_PROMPT
+    assert "language" not in kwargs
+    assert "response_format" not in kwargs
 
 
 # ---------------------------------------------------------------------------
@@ -347,10 +405,211 @@ def test_transcriber_run_marks_transcribed_on_success(tmp_path: Path):
 
     manifest.mark_transcribed.assert_called_once_with(
         "42",
-        {"output_file": "sermon.txt", "model": "openai"},
+        {
+            "output_file": "sermon.txt",
+            "output_path": "transcriptions/sermon.txt",
+            "audio_path": "audio/sermon.ogg",
+            "model": "openai",
+            "transcript_sha256": __import__("hashlib").sha256(
+                b"Thus says the Lord."
+            ).hexdigest(),
+        },
     )
     assert stats.succeeded == 1
     assert stats.failed == 0
+
+
+def test_transcriber_persists_each_success_before_starting_next_item(
+    tmp_path: Path,
+) -> None:
+    config = _make_config(tmp_path)
+    manifest = Manifest(tmp_path / "manifest.json")
+    for msg_id, filename in (("1", "first.ogg"), ("2", "second.ogg")):
+        audio = _make_audio_file(tmp_path, filename)
+        manifest.mark_downloaded(
+            msg_id,
+            {
+                "filename": filename,
+                "hash": hashlib.sha256(audio.read_bytes()).hexdigest(),
+            },
+        )
+    manifest.save()
+
+    backend = MagicMock(spec=TranscriptionBackend)
+    backend.name = "openai"
+
+    def transcribe(audio_path: Path) -> str:
+        if audio_path.name == "second.ogg":
+            on_disk = Manifest(tmp_path / "manifest.json").get_entry("1")
+            assert on_disk is not None
+            assert on_disk["transcription"]["status"] == "completed"
+        return f"Transcript for {audio_path.stem}."
+
+    backend.transcribe.side_effect = transcribe
+
+    stats = Transcriber(config, manifest, backend=backend).run()
+
+    assert stats.succeeded == 2
+    assert backend.transcribe.call_count == 2
+
+
+def test_transcriber_calls_backend_once_for_canonical_and_duplicate(
+    tmp_path: Path,
+) -> None:
+    """A persisted Telegram duplicate never causes a second paid call."""
+    config = _make_config(tmp_path)
+    audio = _make_audio_file(tmp_path, "canonical.ogg")
+    audio_hash = hashlib.sha256(audio.read_bytes()).hexdigest()
+    manifest = Manifest(tmp_path / "manifest.json")
+    manifest.mark_downloaded(
+        100,
+        {
+            "filename": audio.name,
+            "hash": audio_hash,
+            "title": "Canonical sermon",
+        },
+    )
+    manifest.mark_downloaded(
+        101,
+        {
+            "filename": audio.name,
+            "hash": audio_hash,
+            "title": "Reposted sermon",
+            "duplicate": True,
+            "duplicate_of": 100,
+        },
+    )
+
+    backend = MagicMock(spec=TranscriptionBackend)
+    backend.name = "openai"
+    backend.transcribe.return_value = "Canonical transcript."
+
+    stats = Transcriber(config, manifest, backend=backend).run()
+
+    assert stats.succeeded == 1
+    backend.transcribe.assert_called_once_with(audio)
+    assert manifest.get_entry(100)["transcription"]["status"] == "completed"
+    assert "transcription" not in manifest.get_entry(101)
+
+
+def test_transcriber_persists_each_failure_before_starting_next_item(
+    tmp_path: Path,
+) -> None:
+    config = _make_config(tmp_path)
+    manifest = Manifest(tmp_path / "manifest.json")
+    for msg_id, filename in (("1", "first.ogg"), ("2", "second.ogg")):
+        audio = _make_audio_file(tmp_path, filename)
+        manifest.mark_downloaded(
+            msg_id,
+            {
+                "filename": filename,
+                "hash": hashlib.sha256(audio.read_bytes()).hexdigest(),
+            },
+        )
+    manifest.save()
+
+    backend = MagicMock(spec=TranscriptionBackend)
+    backend.name = "openai"
+
+    def transcribe(audio_path: Path) -> str:
+        if audio_path.name == "first.ogg":
+            raise RuntimeError("temporary provider failure")
+        on_disk = Manifest(tmp_path / "manifest.json").get_entry("1")
+        assert on_disk is not None
+        assert on_disk["failed_stage"] == "transcription"
+        assert on_disk["transcription"]["status"] == "failed"
+        return "Second transcript."
+
+    backend.transcribe.side_effect = transcribe
+
+    stats = Transcriber(config, manifest, backend=backend).run()
+
+    assert stats.failed == 1
+    assert stats.succeeded == 1
+    assert backend.transcribe.call_count == 2
+
+
+def test_transcriber_skips_completed_output_when_file_and_hash_match(
+    tmp_path: Path,
+) -> None:
+    config = _make_config(tmp_path)
+    audio = _make_audio_file(tmp_path, "sermon.ogg")
+    output = config.transcribe.transcriptions_dir / "sermon.txt"
+    output.parent.mkdir(parents=True)
+    output.write_text("Already completed.", encoding="utf-8")
+    entry = {
+        "telegram_msg_id": "42",
+        "filename": audio.name,
+        "title": None,
+        "hash": hashlib.sha256(audio.read_bytes()).hexdigest(),
+        "downloaded": True,
+        "transcription": {
+            "status": "machine_transcribed",
+            "output_file": output.name,
+            "transcript_sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
+        },
+    }
+    manifest = _make_manifest()
+    manifest.all_entries.return_value = {"42": entry}
+    backend = MagicMock(spec=TranscriptionBackend)
+    backend.name = "openai"
+
+    stats = Transcriber(config, manifest, backend=backend).run()
+
+    backend.transcribe.assert_not_called()
+    manifest.mark_transcribed.assert_not_called()
+    assert stats.total == 0
+
+
+def test_transcriber_requeues_terminal_entry_when_output_is_missing(
+    tmp_path: Path,
+) -> None:
+    config = _make_config(tmp_path)
+    audio = _make_audio_file(tmp_path, "sermon.ogg")
+    entry = {
+        "telegram_msg_id": "42",
+        "filename": audio.name,
+        "title": None,
+        "hash": hashlib.sha256(audio.read_bytes()).hexdigest(),
+        "downloaded": True,
+        "transcription": {
+            "status": "machine_transcribed",
+            "output_file": "sermon.txt",
+            "transcript_sha256": hashlib.sha256(b"Missing transcript").hexdigest(),
+        },
+    }
+    manifest = _make_manifest()
+    manifest.all_entries.return_value = {"42": entry}
+    backend = MagicMock(spec=TranscriptionBackend)
+    backend.name = "openai"
+    backend.transcribe.return_value = "Recovered transcript."
+
+    stats = Transcriber(config, manifest, backend=backend).run()
+
+    backend.transcribe.assert_called_once_with(audio)
+    assert (config.transcribe.transcriptions_dir / "sermon.txt").read_text() == (
+        "Recovered transcript."
+    )
+    assert stats.succeeded == 1
+
+
+def test_terminal_entry_is_requeued_when_transcript_hash_changed(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "transcriptions" / "sermon.txt"
+    output.parent.mkdir(parents=True)
+    output.write_text("Changed", encoding="utf-8")
+    intact, reason = Transcriber._transcript_output_is_intact(
+        {
+            "transcription": {
+                "output_file": "sermon.txt",
+                "transcript_sha256": hashlib.sha256(b"Original").hexdigest(),
+            }
+        },
+        output.parent,
+    )
+    assert intact is False
+    assert "SHA-256" in reason
 
 
 # ---------------------------------------------------------------------------
@@ -399,6 +658,44 @@ def test_transcriber_run_writes_output_file(tmp_path: Path):
     out_file = config.transcribe.transcriptions_dir / "Morning Devotion.txt"
     assert out_file.exists()
     assert out_file.read_text(encoding="utf-8") == "Grace and peace to you."
+
+
+def test_transcriber_never_overwrites_preferred_or_fallback_output(
+    tmp_path: Path,
+) -> None:
+    config = _make_config(tmp_path)
+    _make_audio_file(tmp_path, "devotion.ogg")
+    pending = [
+        {
+            "telegram_msg_id": "5",
+            "filename": "devotion.ogg",
+            "title": "Morning Devotion",
+        }
+    ]
+    manifest = _make_manifest(pending)
+    output_dir = config.transcribe.transcriptions_dir
+    output_dir.mkdir(parents=True)
+    preferred = output_dir / "Morning Devotion.txt"
+    first_fallback = output_dir / "Morning Devotion_5.txt"
+    preferred.write_text("authoritative first transcript", encoding="utf-8")
+    first_fallback.write_text("authoritative second transcript", encoding="utf-8")
+
+    backend = MagicMock(spec=TranscriptionBackend)
+    backend.name = "openai"
+    backend.transcribe.return_value = "New independent transcript."
+
+    stats = Transcriber(config, manifest, backend=backend).run()
+
+    assert stats.succeeded == 1
+    assert preferred.read_text(encoding="utf-8") == "authoritative first transcript"
+    assert (
+        first_fallback.read_text(encoding="utf-8")
+        == "authoritative second transcript"
+    )
+    published = output_dir / "Morning Devotion_5_2.txt"
+    assert published.read_text(encoding="utf-8") == "New independent transcript."
+    result = manifest.mark_transcribed.call_args.args[1]
+    assert result["output_file"] == published.name
 
 
 # ---------------------------------------------------------------------------

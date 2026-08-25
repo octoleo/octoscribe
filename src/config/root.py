@@ -31,7 +31,8 @@ _SECRET_FIELDS = {
     ("telegram", "phone"),
     ("telegram", "api_id"),
     ("transcribe", "api_key"),
-    ("data_repo", "url"),
+    ("transcribe", "xai_api_key"),
+    ("transcribe", "meta_asr_api_key"),
 }
 
 
@@ -55,6 +56,25 @@ class Config:
     source: SourceConfig = field(
         default_factory=lambda: SourceConfig(mode="telegram", folder=None, recursive=True)
     )
+    # ``data_repo`` remains the audio repository for backwards compatibility.
+    # When ``transcript_repo`` is omitted, both kinds of evidence deliberately
+    # share the legacy repository.  New configurations resolve it separately.
+    transcript_repo: Optional[DataRepoConfig] = None
+
+    @property
+    def audio_repo(self) -> DataRepoConfig:
+        """Workspace containing immutable source audio (legacy: data_repo)."""
+        return self.data_repo
+
+    @property
+    def text_repo(self) -> DataRepoConfig:
+        """Workspace containing transcripts, reports, and the manifest."""
+        return self.transcript_repo or self.data_repo
+
+    @property
+    def repositories_are_split(self) -> bool:
+        """Whether audio and transcript evidence use different workspaces."""
+        return self.audio_repo.path != self.text_repo.path
 
     # ------------------------------------------------------------------
     # Public factory
@@ -65,6 +85,7 @@ class Config:
         cls,
         ini_path: Optional[str | Path] = None,
         env_file: Optional[str | Path] = None,
+        validation_profile: str = "run",
         **overrides: Any,
     ) -> "Config":
         """
@@ -91,7 +112,12 @@ class Config:
         # decoupled and free of import cycles.
         from src.config.loader import _ConfigLoader
 
-        loader = _ConfigLoader(ini_path=ini_path, env_file=env_file, overrides=overrides)
+        loader = _ConfigLoader(
+            ini_path=ini_path,
+            env_file=env_file,
+            overrides=overrides,
+            validation_profile=validation_profile,
+        )
         return loader.build()
 
     # ------------------------------------------------------------------
@@ -118,6 +144,8 @@ class Config:
         _fmt_sub("download", self.download)
         _fmt_sub("transcribe", self.transcribe)
         _fmt_sub("data_repo", self.data_repo)
+        if self.transcript_repo is not None:
+            _fmt_sub("transcript_repo", self.transcript_repo)
         lines.append(f"  ini_path={self.ini_path!r},")
         lines.append(")")
         return "\n".join(lines)

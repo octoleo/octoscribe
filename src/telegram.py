@@ -10,8 +10,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from telethon import TelegramClient
 from telethon.tl.types import (
@@ -257,6 +259,45 @@ def build_filename(metadata: AudioMetadata) -> str:
     return f"{base}{ext}"
 
 
+def _is_sha256(value: object) -> bool:
+    """Return whether *value* is a canonical lower-case SHA-256 digest."""
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _manifest_audio_path(audio_dir: Path, filename: object) -> Path | None:
+    """Resolve a Telegram manifest filename without permitting path escape."""
+    if not isinstance(filename, str) or not filename:
+        return None
+    relative = Path(filename)
+    if relative.is_absolute() or len(relative.parts) != 1 or relative.name != filename:
+        return None
+    return audio_dir / relative
+
+
+def _download_metadata(
+    metadata: AudioMetadata,
+    *,
+    filename: str,
+    sha256_hex: str,
+) -> dict[str, object]:
+    """Build the established Telegram manifest payload for one audio item."""
+    return {
+        "filename": filename,
+        "title": metadata.title,
+        "performer": metadata.performer,
+        "date": metadata.date,
+        "duration": metadata.duration,
+        "duration_formatted": format_duration(metadata.duration),
+        "extension": metadata.extension,
+        "hash": sha256_hex,
+        "original_filename": metadata.original_filename,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Main downloader class
 # ---------------------------------------------------------------------------
@@ -394,6 +435,8 @@ class TelegramDownloader:
                     stats.skipped += 1
                 case "duplicate":
                     stats.duplicate += 1
+                    if saver.tick():
+                        log.debug("Manifest saved (periodic, %d acquired)", saver.count)
                 case "failed":
                     stats.failed += 1
 
@@ -409,6 +452,128 @@ class TelegramDownloader:
     # Per-message download
     # ------------------------------------------------------------------
 
+    def _verified_duplicate(
+        self,
+        msg_id: int,
+        sha256_hex: str,
+    ) -> tuple[str, dict[str, Any], Path] | None:
+        """Return an existing, on-disk duplicate only after hashing its file."""
+        audio_dir = self._config.download.audio_dir
+        for existing_id, existing_entry in self._manifest.all_entries().items():
+            if str(existing_id) == str(msg_id) or not isinstance(existing_entry, dict):
+                continue
+            if not existing_entry.get("downloaded"):
+                continue
+            if existing_entry.get("hash") != sha256_hex:
+                continue
+            existing_path = _manifest_audio_path(
+                audio_dir,
+                existing_entry.get("filename"),
+            )
+            if (
+                existing_path is None
+                or existing_path.is_symlink()
+                or not existing_path.is_file()
+            ):
+                continue
+            try:
+                if _sha256_file(existing_path) != sha256_hex:
+                    log.warning(
+                        "Ignoring stale duplicate candidate: message_id=%s output=%s",
+                        existing_id,
+                        existing_path,
+                    )
+                    continue
+            except OSError as exc:
+                log.warning(
+                    "Cannot verify duplicate candidate: message_id=%s output=%s error=%s",
+                    existing_id,
+                    existing_path,
+                    exc,
+                )
+                continue
+            return str(existing_id), existing_entry, existing_path
+        return None
+
+    @staticmethod
+    def _staging_path(audio_dir: Path, msg_id: int, extension: str) -> Path:
+        """Create a private same-filesystem path for an atomic download install."""
+        descriptor, raw_path = tempfile.mkstemp(
+            dir=audio_dir,
+            prefix=f".octoscribe-{msg_id}-",
+            suffix=extension,
+        )
+        os.close(descriptor)
+        return Path(raw_path)
+
+    @staticmethod
+    def _discard_download(path: Path, staging_path: Path) -> None:
+        """Remove only downloader-owned temporary files."""
+        try:
+            owned_path = path.resolve(strict=False) == staging_path.resolve(strict=False)
+        except OSError:
+            owned_path = False
+        if owned_path:
+            path.unlink(missing_ok=True)
+        staging_path.unlink(missing_ok=True)
+
+    @staticmethod
+    def _install_download(
+        downloaded_path: Path,
+        target_path: Path,
+        *,
+        msg_id: int,
+        sha256_hex: str,
+    ) -> Path | None:
+        """
+        Atomically install a verified download and preserve conflicting bytes.
+
+        A mismatching pre-existing file is renamed with a non-audio
+        ``.corrupt`` suffix before replacement so it is neither lost nor picked
+        up by a later folder-source scan.
+        """
+        if downloaded_path == target_path:
+            return None
+
+        target_present = target_path.exists() or target_path.is_symlink()
+        quarantine_path: Path | None = None
+        if target_present:
+            if target_path.is_dir() and not target_path.is_symlink():
+                raise IsADirectoryError(str(target_path))
+
+            if not target_path.is_symlink() and target_path.is_file():
+                existing_hash = _sha256_file(target_path)
+                if existing_hash == sha256_hex:
+                    downloaded_path.unlink(missing_ok=True)
+                    return None
+                quarantine_tag = existing_hash[:12]
+            else:
+                quarantine_tag = "unsafe-path"
+
+            quarantine_name = (
+                f"{target_path.name}.integrity-mismatch-{quarantine_tag}.corrupt"
+            )
+            quarantine_path = _unique_filepath(
+                target_path.parent,
+                quarantine_name,
+                msg_id,
+            )
+            target_path.replace(quarantine_path)
+
+        try:
+            downloaded_path.replace(target_path)
+        except OSError:
+            # Best-effort rollback: the prior bytes remain authoritative until
+            # the verified replacement has been installed successfully.
+            if (
+                quarantine_path is not None
+                and quarantine_path.exists()
+                and not target_path.exists()
+            ):
+                quarantine_path.replace(target_path)
+            raise
+        return quarantine_path
+
     async def _download_one(self, msg: object) -> str:
         """
         Download a single audio message.
@@ -419,70 +584,234 @@ class TelegramDownloader:
         async with self._semaphore:
             msg_id: int = getattr(msg, "id", 0)
             cfg = self._config
+            resume_entry: dict[str, Any] | None = None
+            resume_target: Path | None = None
+            expected_hash: str | None = None
 
-            # Resume: skip if already recorded in manifest AND file exists
+            # Resume only after the on-disk bytes match the immutable hash in
+            # the manifest.  A mere filename hit is not proof of integrity.
             if cfg.download.resume and self._manifest.is_downloaded(msg_id):
                 entry = self._manifest.get_entry(msg_id)
                 if entry:
-                    filename = entry.get("filename")
-                    if filename and (cfg.download.audio_dir / filename).exists():
-                        log.debug("Skipping msg %d (already downloaded)", msg_id)
-                        return "skipped"
+                    resume_entry = entry
+                    resume_target = _manifest_audio_path(
+                        cfg.download.audio_dir,
+                        entry.get("filename"),
+                    )
+                    recorded_hash = entry.get("hash")
+                    expected_hash = recorded_hash if _is_sha256(recorded_hash) else None
+
+                    if (
+                        resume_target is not None
+                        and expected_hash is not None
+                        and not resume_target.is_symlink()
+                        and resume_target.is_file()
+                    ):
+                        try:
+                            actual_hash = _sha256_file(resume_target)
+                        except OSError as exc:
+                            log.warning(
+                                "Cannot verify previously downloaded Telegram audio; "
+                                "reacquiring: message_id=%d output=%s error=%s",
+                                msg_id,
+                                resume_target,
+                                exc,
+                            )
+                        else:
+                            if actual_hash == expected_hash:
+                                log.info(
+                                    "Skipping verified Telegram audio: "
+                                    "message_id=%d output=%s sha256=%s",
+                                    msg_id,
+                                    resume_target,
+                                    expected_hash,
+                                )
+                                return "skipped"
+                            log.warning(
+                                "Telegram audio integrity mismatch; reacquiring: "
+                                "message_id=%d output=%s expected_sha256=%s "
+                                "actual_sha256=%s",
+                                msg_id,
+                                resume_target,
+                                expected_hash,
+                                actual_hash,
+                            )
+                    else:
+                        log.info(
+                            "Previously downloaded Telegram audio cannot be verified; "
+                            "reacquiring: message_id=%d output=%s recorded_sha256=%s",
+                            msg_id,
+                            resume_target,
+                            recorded_hash,
+                        )
 
             metadata = get_audio_metadata(msg)
-            target_filename = build_filename(metadata)
-            target_path = _unique_filepath(cfg.download.audio_dir, target_filename, msg_id)
-            actual_filename = target_path.name
+            if resume_target is not None:
+                target_path = resume_target
+            else:
+                target_filename = build_filename(metadata)
+                target_path = _unique_filepath(
+                    cfg.download.audio_dir,
+                    target_filename,
+                    msg_id,
+                )
+            staging_path = self._staging_path(
+                cfg.download.audio_dir,
+                msg_id,
+                metadata.extension,
+            )
 
             try:
-                downloaded_path = await self._client.download_media(msg, file=str(target_path))
+                downloaded_result = await self._client.download_media(
+                    msg,
+                    file=str(staging_path),
+                )
             except Exception as exc:
+                staging_path.unlink(missing_ok=True)
                 error_str = str(exc)
                 log.warning("Download failed for msg %d: %s", msg_id, error_str)
                 self._manifest.mark_failed(msg_id, "download", error_str)
                 return "failed"
 
-            if not downloaded_path:
+            if not downloaded_result:
+                staging_path.unlink(missing_ok=True)
                 error_str = "download_media returned None"
                 log.warning("No file returned for msg %d", msg_id)
                 self._manifest.mark_failed(msg_id, "download", error_str)
                 return "failed"
 
-            downloaded_path = Path(downloaded_path)
+            downloaded_path = Path(downloaded_result)
+            try:
+                returned_owned_path = (
+                    downloaded_path.resolve(strict=False)
+                    == staging_path.resolve(strict=False)
+                )
+            except OSError:
+                returned_owned_path = False
+            if not returned_owned_path:
+                staging_path.unlink(missing_ok=True)
+                error_str = "download_media returned an unexpected path"
+                log.warning(
+                    "Rejected unexpected download path for msg %d: %s",
+                    msg_id,
+                    downloaded_path,
+                )
+                self._manifest.mark_failed(msg_id, "download", error_str)
+                return "failed"
+            if downloaded_path.is_symlink() or not downloaded_path.is_file():
+                self._discard_download(downloaded_path, staging_path)
+                error_str = "download_media did not return a regular file"
+                log.warning("Invalid file returned for msg %d: %s", msg_id, downloaded_path)
+                self._manifest.mark_failed(msg_id, "download", error_str)
+                return "failed"
+
+            try:
+                sha256_hex = _sha256_file(downloaded_path)
+            except OSError as exc:
+                self._discard_download(downloaded_path, staging_path)
+                error_str = f"cannot hash downloaded audio: {exc}"
+                log.warning("Cannot hash download for msg %d: %s", msg_id, exc)
+                self._manifest.mark_failed(msg_id, "download", error_str)
+                return "failed"
+
+            # Once a historical hash exists, Telegram must reproduce exactly
+            # those bytes.  Reject a changed remote object without replacing
+            # the old file or rewriting its manifest evidence.
+            if expected_hash is not None and sha256_hex != expected_hash:
+                self._discard_download(downloaded_path, staging_path)
+                error_str = (
+                    "downloaded SHA-256 mismatch: "
+                    f"expected {expected_hash}, got {sha256_hex}"
+                )
+                log.error(
+                    "Rejected changed Telegram audio: message_id=%d %s",
+                    msg_id,
+                    error_str,
+                )
+                self._manifest.mark_failed(msg_id, "download", error_str)
+                return "failed"
 
             # Deduplication by SHA-256
-            sha256_hex: str | None = None
-            if cfg.download.deduplicate:
-                sha256_hex = _sha256_file(downloaded_path)
-                existing_entries = self._manifest.all_entries()
-                for existing_entry in existing_entries.values():
-                    if (
-                        isinstance(existing_entry, dict)
-                        and existing_entry.get("hash") == sha256_hex
-                        and existing_entry.get("downloaded")
-                    ):
-                        downloaded_path.unlink(missing_ok=True)
-                        log.debug(
-                            "Duplicate detected for msg %d (hash=%s); file removed",
-                            msg_id,
-                            sha256_hex,
-                        )
-                        return "duplicate"
-            else:
-                sha256_hex = _sha256_file(downloaded_path)
+            duplicate = None
+            if cfg.download.deduplicate and resume_entry is None:
+                duplicate = self._verified_duplicate(msg_id, sha256_hex)
+            if duplicate is not None:
+                existing_id, existing_entry, existing_path = duplicate
+                self._discard_download(downloaded_path, staging_path)
+                duplicate_of: object = existing_entry.get(
+                    "duplicate_of",
+                    existing_entry.get(
+                        "telegram_msg_id",
+                        int(existing_id) if existing_id.isdigit() else existing_id,
+                    ),
+                )
+                manifest_metadata = _download_metadata(
+                    metadata,
+                    filename=existing_path.name,
+                    sha256_hex=sha256_hex,
+                )
+                manifest_metadata.update(
+                    {
+                        "duplicate": True,
+                        "duplicate_of": duplicate_of,
+                    }
+                )
+                self._manifest.mark_downloaded(msg_id, manifest_metadata)
+                log.info(
+                    "Recorded duplicate Telegram audio: message_id=%d "
+                    "duplicate_of=%s output=%s sha256=%s",
+                    msg_id,
+                    duplicate_of,
+                    existing_path,
+                    sha256_hex,
+                )
+                return "duplicate"
+
+            try:
+                quarantine_path = self._install_download(
+                    downloaded_path,
+                    target_path,
+                    msg_id=msg_id,
+                    sha256_hex=sha256_hex,
+                )
+                if staging_path != downloaded_path:
+                    staging_path.unlink(missing_ok=True)
+            except OSError as exc:
+                self._discard_download(downloaded_path, staging_path)
+                error_str = f"cannot safely install downloaded audio: {exc}"
+                log.error("Download install failed for msg %d: %s", msg_id, exc)
+                self._manifest.mark_failed(msg_id, "download", error_str)
+                return "failed"
+
+            if quarantine_path is not None:
+                log.warning(
+                    "Preserved mismatching Telegram audio before recovery: "
+                    "message_id=%d quarantine=%s",
+                    msg_id,
+                    quarantine_path,
+                )
 
             # Record in manifest
-            manifest_metadata: dict[str, object] = {
-                "filename": actual_filename,
-                "title": metadata.title,
-                "performer": metadata.performer,
-                "date": metadata.date,
-                "duration": metadata.duration,
-                "duration_formatted": format_duration(metadata.duration),
-                "extension": metadata.extension,
-                "hash": sha256_hex,
-                "original_filename": metadata.original_filename,
-            }
+            if resume_entry is not None:
+                # Preserve all historical Telegram metadata during recovery;
+                # update only the evidence needed to make future resume checks
+                # trustworthy.
+                manifest_metadata = {
+                    "filename": target_path.name,
+                    "hash": sha256_hex,
+                }
+            else:
+                manifest_metadata = _download_metadata(
+                    metadata,
+                    filename=target_path.name,
+                    sha256_hex=sha256_hex,
+                )
             self._manifest.mark_downloaded(msg_id, manifest_metadata)
-            log.debug("Downloaded msg %d → %s", msg_id, actual_filename)
+            log.info(
+                "Downloaded Telegram audio: message_id=%d output=%s sha256=%s bytes=%d",
+                msg_id,
+                target_path,
+                sha256_hex,
+                target_path.stat().st_size,
+            )
             return "downloaded"
