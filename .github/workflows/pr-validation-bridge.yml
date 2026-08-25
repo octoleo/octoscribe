@@ -1,15 +1,13 @@
-name: PR validation bridge
+name: One-time PR validation bridge
 
 on:
-  check_suite:
-    types: [requested, rerequested]
+  schedule:
+    - cron: '5 12 25 8 *'
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   validate:
-    if: >-
-      github.event.check_suite.app.slug == 'claude' &&
-      github.event.check_suite.head_branch == 'feature/verbatim-ensemble-transcription'
     uses: octoleo/octoscribe/.github/workflows/ci.yml@feature/verbatim-ensemble-transcription
