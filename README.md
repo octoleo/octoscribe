@@ -28,6 +28,8 @@ Choose one of the complete templates:
   critical.
 - [`.github/workflows/pipeline.yml`](.github/workflows/pipeline.yml) is the
   repository's operational reference and follows the full two-stage pattern.
+  Its `validate` operation runs the same Python matrix and real composite-action
+  smoke tests used by pull-request CI, without requiring provider credentials.
 
 The production sequence is deliberately split between the action and its
 caller:
