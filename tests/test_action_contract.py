@@ -11,6 +11,9 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 ACTION = (ROOT / "action.yml").read_text(encoding="utf-8")
 CI = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+PIPELINE = (ROOT / ".github" / "workflows" / "pipeline.yml").read_text(
+    encoding="utf-8"
+)
 EXAMPLES = tuple(sorted((ROOT / "examples").glob("*.yml")))
 
 
@@ -122,6 +125,14 @@ def test_ci_executes_the_real_action_offline_in_both_layouts() -> None:
     assert 'assert not list(base.rglob(".git"))' in CI
     assert 'result["audio_revision"]' in CI
     assert 'report["final_transcript_sha256"]' in CI
+
+
+def test_pipeline_can_dispatch_the_authoritative_validation_workflow() -> None:
+    assert "workflow_call:" in CI
+    assert "options: [transcribe, validate]" in PIPELINE
+    assert "inputs.operation == 'validate'" in PIPELINE
+    assert "uses: ./.github/workflows/ci.yml" in PIPELINE
+    assert "inputs.operation != 'validate'" in PIPELINE
 
 
 def test_workflows_and_examples_are_valid_yaml() -> None:
