@@ -70,17 +70,17 @@ python -m pytest --cov=src --cov-report=html
 | `test_meta_backend.py` | Explicit ASR URL resolution, HTTPS/loopback rules, multipart model/language, optional bearer token, response formats, retries, and validation. |
 | `test_transcribe.py` | OpenAI and optional local adapter contracts, transport retries, empty output, backend compatibility, and batch orchestration. |
 | `test_transcriber_ensemble.py` | Batch integration with the ensemble, `needs-review` quarantine, hashes, provider failures, and manifest/report links. |
-| `test_transcribe_cmd.py` | Standalone transcription's committed-audio gate and revision provenance. |
+| `test_transcribe_cmd.py` | Caller-supplied audio revision/branch provenance and Git-independent transcription. |
 | `test_transcribe_hardening.py` | Collision-safe output paths and the empty-result failure guard. |
 | `test_retry.py` | Transient/permanent error classification, backoff, exhaustion, and hard retry bounds. |
 | `test_manifest.py` | Source-hash immutability, quality states, pending queries, human verification, stats, atomic JSON, and thread safety. |
 | `test_folder.py` | Recursive/flat scans, supported formats, content-hash dedup, resume, copy verification, and source preservation. |
 | `test_telegram.py`, `test_telegram_client.py` | Audio selection, metadata, download behaviour, entity resolution, session handling, and Telegram retries with Telethon mocked. |
-| `test_repository.py` | Clone/init/pull, expected branch, append-only audio gate, tracked-source proof, split commit order, push failures, timeouts, and secret path protection. |
-| `test_config.py` | Precedence, provider discovery/order, command-aware secrets, split/legacy repositories, endpoint rules, path resolution, and numeric bounds. |
+| `test_config.py` | Precedence, provider discovery/order, command-aware secrets, split/shared workspace paths, endpoint rules, path resolution, and numeric bounds. |
 | `test_source_cmd.py` | CLI overrides and folder/Telegram source dispatch. |
 | `test_ci_export_cmd.py`, `test_session_cmd.py`, `test_debug.py` | CI export guard/redaction, Telegram session commands, and diagnostic behaviour. |
 | `test_persistence.py` | Atomic text writes and periodic manifest saves. |
+| `test_action_contract.py` | Composite-action input mapping, no-Git boundary, shared/split paths, and caller-supplied provenance. |
 
 ## Fidelity properties under test
 
@@ -91,12 +91,12 @@ SHA-256 value, that folder copies are verified, that the ensemble rejects an
 unexpected source hash before provider work, and that evidence writing rechecks
 source and chunk bytes.
 
-When modifying acquisition or repository code, include at least these cases:
+When modifying acquisition or workspace-path code, include at least these cases:
 
 - identical bytes resume without duplication;
 - changed bytes under an existing identity fail;
 - a failed or corrupt copy does not remain as accepted audio;
-- transcript publication cannot proceed after an audio commit/tracking failure.
+- caller-supplied revision and branch are recorded without running Git.
 
 ### Chunk planning and seams
 
@@ -110,10 +110,16 @@ must satisfy:
 - reversing or duplicating silence inputs does not change the plan.
 
 Production seam defaults require six exact normalized matching tokens and
-similarity `1.0`. Tests specifically guard against deleting text when there is
-a substitution, insertion, deletion, short common phrase, or unrelated seam.
-If no seam is accepted, both surfaces remain and the overall result becomes
-`needs_review`.
+similarity `1.0`. Stitching is a deterministic comparison of overlapping ASR
+text, never a generative edit or additional provider call. Tests specifically
+guard against deleting text when there is a substitution, insertion, deletion,
+short common phrase, or unrelated seam. If no seam is accepted, both surfaces
+remain and the overall result becomes `needs_review`.
+
+Include long-duration plans (including 90-minute inputs) to prove that the
+recording is partitioned into bounded requests with the configured overlap and
+without gaps. Such tests operate on duration/boundary policy and do not require
+a 90-minute fixture file.
 
 ### Provider independence and hard stop
 
@@ -185,12 +191,14 @@ Pure planning tests do not call ffmpeg. Unit tests inject a subprocess runner
 and assert arguments/results. The integration test is intentionally narrow: it
 generates PCM samples, uses local ffmpeg/ffprobe, and performs no network I/O.
 
-### Telegram and git
+### Telegram and workflow Git boundary
 
-Telegram tests replace asynchronous client methods with `AsyncMock`. Repository
-unit tests replace `subprocess.run` and explicitly model stdout, stderr, exit
-codes, timeout exceptions, and branch state. Temporary real git repositories
-may be used only when they remain inside `tmp_path` and require no remote.
+Telegram tests replace asynchronous client methods with `AsyncMock`. Action and
+CLI contract tests assert that OctoScribe itself never runs Git. Workflow
+templates may be statically checked for the expected caller-owned sequence:
+clone, acquire, audio/index checkpoint, revision capture, transcribe, evidence
+checkpoint, and failure propagation. Temporary Git repositories used to test
+workflow helper behavior must remain inside `tmp_path` and require no remote.
 
 ## Adding or changing functionality
 
@@ -222,8 +230,9 @@ full suite with coverage, and uploads the Python 3.12 coverage file to Codecov
 without making Codecov availability a test gate.
 
 The CI test workflow is distinct from `.github/workflows/pipeline.yml`, which
-is the credentialed operational workflow that acquires and transcribes real
-audio.
+is the credentialed operational reference. The caller workflow owns all Git
+operations; the OctoScribe action only acquires, hashes, transcribes, records
+evidence, and reports progress to standard output.
 
 CI validates provider contracts offline. Before promoting a model or provider
 configuration, separately evaluate it on a private, human-verified sermon set

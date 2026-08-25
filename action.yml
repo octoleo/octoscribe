@@ -1,9 +1,8 @@
 name: OctoScribe
 description: >
-  Imports audio from Telegram or a folder, transcribes it with one to three
-  independent ASR providers, and preserves audio and transcript evidence in
-  separate repositories. Prepare the repository paths first and configure
-  authentication when their remotes require pull or push access.
+  Imports audio from Telegram or a folder and produces verbatim transcripts,
+  evidence, reports, and a persistent manifest. Repository operations belong
+  to the calling workflow.
 
 inputs:
   telegram_api_id:
@@ -15,15 +14,15 @@ inputs:
     required: false
     default: ''
   telegram_phone:
-    description: 'Telegram phone number; required only for Telegram run/download'
+    description: 'Telegram phone; required only for Telegram run/download'
     required: false
     default: ''
   telegram_session_b64:
-    description: 'Base64 Telegram session; required only for non-interactive Telegram run/download'
+    description: 'Base64 Telegram session for non-interactive Telegram access'
     required: false
     default: ''
   telegram_group:
-    description: 'Telegram group (@username or numeric ID); required only for Telegram run/download'
+    description: 'Telegram group (@username or numeric ID)'
     required: false
     default: ''
   source:
@@ -34,7 +33,6 @@ inputs:
     description: 'Existing audio folder; required when source=folder'
     required: false
     default: ''
-
   openai_api_key:
     description: 'OpenAI API key; enables the openai provider'
     required: false
@@ -43,6 +41,10 @@ inputs:
     description: 'xAI API key; enables the xai provider'
     required: false
     default: ''
+  xai_base_url:
+    description: 'xAI speech-to-text endpoint'
+    required: false
+    default: 'https://api.x.ai/v1/stt'
   meta_asr_url:
     description: 'OpenAI-compatible endpoint serving a Meta ASR model'
     required: false
@@ -54,52 +56,92 @@ inputs:
   meta_asr_model:
     description: 'Model identifier exposed by the Meta ASR endpoint'
     required: false
-    default: ''
+    default: 'omniASR_LLM_Unlimited_7B_v2'
   meta_asr_language:
-    description: 'Meta Omnilingual language/script code, for example eng_Latn'
+    description: 'Meta Omnilingual language/script code, e.g. eng_Latn'
     required: false
-    default: ''
+    default: 'eng_Latn'
   providers:
-    description: 'Ordered ASR providers (one to three): openai,xai,meta,whisper'
+    description: 'Ordered providers (one to three): openai,xai,meta,whisper'
     required: false
     default: ''
   primary_provider:
     description: 'Canonical provider; defaults to the first enabled provider'
     required: false
     default: ''
-
-  audio_repo_path:
-    description: 'Local path to the pre-cloned immutable-audio repository'
+  transcribe_model:
+    description: 'OpenAI transcription model'
     required: false
-    default: './audio-data'
-  transcript_repo_path:
-    description: 'Local path to the pre-cloned transcript/evidence repository'
+    default: 'gpt-transcribe'
+  transcribe_language:
+    description: 'Spoken-language code passed to transcription providers'
     required: false
-    default: './transcript-data'
-  data_repo_path:
-    description: 'Legacy shared repository path; used when split paths are omitted'
-    required: false
-    default: ''
+    default: 'en'
   transcribe_backend:
     description: 'Legacy single-backend override: openai or local'
     required: false
     default: ''
+  local_model:
+    description: 'Local faster-whisper model identifier'
+    required: false
+    default: 'large-v3'
+  local_device:
+    description: 'Local faster-whisper device: cpu, cuda, or auto'
+    required: false
+    default: 'cpu'
+  local_compute_type:
+    description: 'Local faster-whisper compute type (cpu default: int8)'
+    required: false
+    default: 'int8'
+  audio_repo_path:
+    description: 'Caller-prepared audio workspace (split layout)'
+    required: false
+    default: ''
+  transcript_repo_path:
+    description: 'Caller-prepared transcript/evidence workspace (split layout)'
+    required: false
+    default: ''
+  data_repo_path:
+    description: 'Caller-prepared shared audio/transcript workspace'
+    required: false
+    default: ''
+  audio_revision:
+    description: 'Optional caller-supplied 40- or 64-character audio commit hash'
+    required: false
+    default: ''
+  audio_repository_branch:
+    description: 'Optional caller-supplied audio repository branch for provenance'
+    required: false
+    default: ''
   command:
-    description: 'Pipeline command: run | download | transcribe | sync | status'
+    description: 'Pipeline command: run | download | transcribe | status'
     required: false
     default: 'run'
-  no_push:
-    description: 'Set to "true" to skip the final git push'
-    required: false
-    default: 'false'
   config_path:
-    description: 'Path to octoscribe.ini (optional; uses defaults if not set)'
+    description: 'Path to octoscribe.ini (optional)'
     required: false
     default: ''
   verbose:
-    description: 'Set to "true" to enable debug logging'
+    description: 'Set to true to enable debug logging'
     required: false
     default: 'false'
+
+outputs:
+  audio_dir:
+    description: 'Resolved directory containing preserved source audio'
+    value: ${{ steps.process.outputs.audio_dir }}
+  manifest_file:
+    description: 'Resolved persistent manifest/index path'
+    value: ${{ steps.process.outputs.manifest_file }}
+  transcriptions_dir:
+    description: 'Resolved directory containing authoritative transcripts'
+    value: ${{ steps.process.outputs.transcriptions_dir }}
+  candidates_dir:
+    description: 'Resolved directory containing immutable provider candidates'
+    value: ${{ steps.process.outputs.candidates_dir }}
+  reports_dir:
+    description: 'Resolved directory containing provenance reports'
+    value: ${{ steps.process.outputs.reports_dir }}
 
 runs:
   using: composite
@@ -118,12 +160,9 @@ runs:
           ffmpeg -version
           exit 0
         fi
-
         if command -v apt-get >/dev/null 2>&1; then
           OCTOSCRIBE_SUDO=()
-          if [ "$(id -u)" -ne 0 ]; then
-            OCTOSCRIBE_SUDO=(sudo)
-          fi
+          if [ "$(id -u)" -ne 0 ]; then OCTOSCRIBE_SUDO=(sudo); fi
           "${OCTOSCRIBE_SUDO[@]}" apt-get update
           "${OCTOSCRIBE_SUDO[@]}" apt-get install -y ffmpeg
         elif command -v brew >/dev/null 2>&1; then
@@ -152,26 +191,18 @@ runs:
           "$INPUT_CONFIG_PATH" "$INPUT_TRANSCRIBE_BACKEND" \
           "$INPUT_PROVIDERS" <<'PY'
         import sys
-
         action_path, config_path, backend, providers = sys.argv[1:]
         sys.path.insert(0, action_path)
-
         from src.config import Config
-
         overrides = {}
         if backend:
             overrides["transcribe__backend"] = backend
         if providers:
             overrides["transcribe__providers"] = providers
-        config = Config.load(
-            ini_path=config_path or None,
-            validation_profile="status",
-            **overrides,
-        )
-        requested = (
-            config.transcribe.backend.strip().lower() == "local"
-            or "whisper" in config.transcribe.providers
-        )
+        config = Config.load(ini_path=config_path or None,
+                             validation_profile="status", **overrides)
+        requested = (config.transcribe.backend.strip().lower() == "local"
+                     or "whisper" in config.transcribe.providers)
         print("true" if requested else "false")
         PY
         )"
@@ -182,6 +213,7 @@ runs:
         fi
 
     - name: Run OctoScribe
+      id: process
       shell: bash
       env:
         OCTOSCRIBE_ACTION_PATH: ${{ github.action_path }}
@@ -194,18 +226,25 @@ runs:
         INPUT_SOURCE_FOLDER: ${{ inputs.source_folder }}
         OPENAI_API_KEY: ${{ inputs.openai_api_key }}
         XAI_API_KEY: ${{ inputs.xai_api_key }}
+        XAI_STT_URL: ${{ inputs.xai_base_url }}
         META_ASR_URL: ${{ inputs.meta_asr_url }}
         META_ASR_API_KEY: ${{ inputs.meta_asr_api_key }}
         META_ASR_MODEL: ${{ inputs.meta_asr_model }}
         META_ASR_LANGUAGE: ${{ inputs.meta_asr_language }}
+        TRANSCRIBE_MODEL: ${{ inputs.transcribe_model }}
+        TRANSCRIBE_LANGUAGE: ${{ inputs.transcribe_language }}
         INPUT_PROVIDERS: ${{ inputs.providers }}
         INPUT_PRIMARY_PROVIDER: ${{ inputs.primary_provider }}
+        INPUT_TRANSCRIBE_BACKEND: ${{ inputs.transcribe_backend }}
+        INPUT_LOCAL_MODEL: ${{ inputs.local_model }}
+        INPUT_LOCAL_DEVICE: ${{ inputs.local_device }}
+        INPUT_LOCAL_COMPUTE_TYPE: ${{ inputs.local_compute_type }}
         INPUT_AUDIO_REPO_PATH: ${{ inputs.audio_repo_path }}
         INPUT_TRANSCRIPT_REPO_PATH: ${{ inputs.transcript_repo_path }}
         INPUT_DATA_REPO_PATH: ${{ inputs.data_repo_path }}
-        INPUT_TRANSCRIBE_BACKEND: ${{ inputs.transcribe_backend }}
+        INPUT_AUDIO_REVISION: ${{ inputs.audio_revision }}
+        INPUT_AUDIO_REPOSITORY_BRANCH: ${{ inputs.audio_repository_branch }}
         INPUT_COMMAND: ${{ inputs.command }}
-        INPUT_NO_PUSH: ${{ inputs.no_push }}
         INPUT_CONFIG_PATH: ${{ inputs.config_path }}
         INPUT_VERBOSE: ${{ inputs.verbose }}
         TELEGRAM_API_ID: ${{ inputs.telegram_api_id }}
@@ -215,89 +254,76 @@ runs:
         set -euo pipefail
 
         case "$INPUT_COMMAND" in
-          run|download|transcribe|sync|status) ;;
-          *)
-            echo "Unsupported OctoScribe command: $INPUT_COMMAND" >&2
-            exit 2
-            ;;
+          run|download|transcribe|status) ;;
+          *) echo "Unsupported OctoScribe command: $INPUT_COMMAND" >&2; exit 2 ;;
         esac
         case "$INPUT_SOURCE" in
           telegram|folder) ;;
-          *)
-            echo "Unsupported audio source: $INPUT_SOURCE" >&2
-            exit 2
-            ;;
+          *) echo "Unsupported audio source: $INPUT_SOURCE" >&2; exit 2 ;;
         esac
 
-        if { [ -n "$INPUT_AUDIO_REPO_PATH" ] && [ -z "$INPUT_TRANSCRIPT_REPO_PATH" ]; } || \
-           { [ -z "$INPUT_AUDIO_REPO_PATH" ] && [ -n "$INPUT_TRANSCRIPT_REPO_PATH" ]; }; then
-          echo 'audio_repo_path and transcript_repo_path must be supplied together.' >&2
+        if [ -n "$INPUT_DATA_REPO_PATH" ]; then
+          if [ -n "$INPUT_AUDIO_REPO_PATH" ] || [ -n "$INPUT_TRANSCRIPT_REPO_PATH" ]; then
+            echo 'Use data_repo_path alone, or use audio_repo_path and transcript_repo_path together.' >&2
+            exit 2
+          fi
+        elif [ -z "$INPUT_AUDIO_REPO_PATH" ] || [ -z "$INPUT_TRANSCRIPT_REPO_PATH" ]; then
+          echo 'Supply data_repo_path, or supply both audio_repo_path and transcript_repo_path.' >&2
           exit 2
         fi
 
-        # Keep credentials and Telethon session databases out of every data
-        # worktree, including repositories created by older OctoScribe releases.
-        protect_evidence_repo() {
-          local repo_path="$1"
-          [ -n "$repo_path" ] || return 0
-          git -C "$repo_path" rev-parse --is-inside-work-tree >/dev/null 2>&1 || return 0
+        python3 - "$INPUT_AUDIO_REVISION" "$INPUT_AUDIO_REPOSITORY_BRANCH" \
+          "$INPUT_LOCAL_MODEL" "$INPUT_LOCAL_DEVICE" \
+          "$INPUT_LOCAL_COMPUTE_TYPE" "$INPUT_DATA_REPO_PATH" \
+          "$INPUT_AUDIO_REPO_PATH" "$INPUT_TRANSCRIPT_REPO_PATH" <<'PY'
+        import re
+        import sys
+        from pathlib import Path
+        revision, branch, model, device, compute_type, data_path, audio_path, text_path = sys.argv[1:]
+        if revision and re.fullmatch(r"(?:[0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})", revision) is None:
+            raise SystemExit("audio_revision must be a 40- or 64-character hexadecimal hash")
+        for name, value in (("local_model", model), ("local_device", device),
+                            ("local_compute_type", compute_type)):
+            if not value:
+                raise SystemExit(f"{name} must not be empty")
+            if any(ord(character) < 32 or ord(character) == 127 for character in value):
+                raise SystemExit(f"{name} must not contain control characters")
+        if branch and any(ord(character) < 32 or ord(character) == 127 for character in branch):
+            raise SystemExit("audio_repository_branch must not contain control characters")
+        if device not in {"cpu", "cuda", "auto"}:
+            raise SystemExit("local_device must be cpu, cuda, or auto")
+        for name, value in (("data_repo_path", data_path),
+                            ("audio_repo_path", audio_path),
+                            ("transcript_repo_path", text_path)):
+            if value and any(ord(character) < 32 or ord(character) == 127 for character in value):
+                raise SystemExit(f"{name} must not contain control characters")
+        if audio_path and Path(audio_path).resolve() == Path(text_path).resolve():
+            raise SystemExit(
+                "audio_repo_path and transcript_repo_path must resolve to different paths; "
+                "use data_repo_path for a shared layout"
+            )
+        PY
 
-          local tracked_sensitive
-          tracked_sensitive="$(
-            git -C "$repo_path" ls-files \
-              | grep -E '(^|/)\.env($|\.)|(^|/)\.session(/|$)|\.session($|-)' \
-              | grep -Ev '(^|/)\.env\.example$' \
-              || true
-          )"
-          if [ -n "$tracked_sensitive" ]; then
-            echo "Refusing to use $repo_path: secret/session paths are already tracked:" >&2
-            printf '%s\n' "$tracked_sensitive" >&2
-            exit 1
-          fi
-
-          local git_dir exclude_file marker
-          git_dir="$(git -C "$repo_path" rev-parse --absolute-git-dir)"
-          exclude_file="$git_dir/info/exclude"
-          marker='# OctoScribe runtime secrets (managed by action)'
-          mkdir -p "$git_dir/info"
-          if ! grep -qxF "$marker" "$exclude_file" 2>/dev/null; then
-            {
-              printf '\n%s\n' "$marker"
-              printf '%s\n' '.env' '.env.*' '!.env.example' '.session/' '*.session' '*.session-*'
-            } >> "$exclude_file"
-          fi
-        }
-
-        if [ -n "$INPUT_AUDIO_REPO_PATH" ]; then
-          protect_evidence_repo "$INPUT_AUDIO_REPO_PATH"
-          protect_evidence_repo "$INPUT_TRANSCRIPT_REPO_PATH"
-        else
-          protect_evidence_repo "$INPUT_DATA_REPO_PATH"
-        fi
-
-        CONFIG_PATH="$INPUT_CONFIG_PATH"
         USES_SOURCE=false
         if [ "$INPUT_COMMAND" = 'run' ] || [ "$INPUT_COMMAND" = 'download' ]; then
           USES_SOURCE=true
         fi
-
-        if [ "$USES_SOURCE" = true ] && [ "$INPUT_SOURCE" = 'folder' ]; then
-          if [ -z "$INPUT_SOURCE_FOLDER" ]; then
-            echo 'source_folder is required when source=folder.' >&2
-            exit 2
-          fi
+        if [ "$USES_SOURCE" = true ] && [ "$INPUT_SOURCE" = 'folder' ] && \
+           [ -z "$INPUT_SOURCE_FOLDER" ]; then
+          echo 'source_folder is required when source=folder.' >&2
+          exit 2
         fi
 
-        OCTOSCRIBE_TEMP_DIR=''
+        OCTOSCRIBE_TEMP_ROOT="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+        OCTOSCRIBE_TEMP_DIR="$(mktemp -d "$OCTOSCRIBE_TEMP_ROOT/octoscribe-runtime.XXXXXX")"
+        chmod 700 "$OCTOSCRIBE_TEMP_DIR"
         cleanup_octoscribe_runtime() {
-          if [ -n "$OCTOSCRIBE_TEMP_DIR" ] && [ -d "$OCTOSCRIBE_TEMP_DIR" ]; then
-            rm -f "$OCTOSCRIBE_TEMP_DIR/octoscribe.session" \
-                  "$OCTOSCRIBE_TEMP_DIR/octoscribe.session-journal" \
-                  "$OCTOSCRIBE_TEMP_DIR/octoscribe.session-wal" \
-                  "$OCTOSCRIBE_TEMP_DIR/octoscribe.session-shm" \
-                  "$OCTOSCRIBE_TEMP_DIR/octoscribe-runtime.ini"
-            rmdir "$OCTOSCRIBE_TEMP_DIR" 2>/dev/null || true
-          fi
+          rm -f "$OCTOSCRIBE_TEMP_DIR/octoscribe.session" \
+                "$OCTOSCRIBE_TEMP_DIR/octoscribe.session-journal" \
+                "$OCTOSCRIBE_TEMP_DIR/octoscribe.session-wal" \
+                "$OCTOSCRIBE_TEMP_DIR/octoscribe.session-shm" \
+                "$OCTOSCRIBE_TEMP_DIR/octoscribe-runtime.ini"
+          rmdir "$OCTOSCRIBE_TEMP_DIR" 2>/dev/null || true
         }
         trap cleanup_octoscribe_runtime EXIT
 
@@ -308,18 +334,12 @@ runs:
             echo 'Telegram credentials, session, and group are required for Telegram run/download.' >&2
             exit 2
           fi
-
-          OCTOSCRIBE_TEMP_ROOT="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
-          OCTOSCRIBE_TEMP_DIR="$(mktemp -d "$OCTOSCRIBE_TEMP_ROOT/octoscribe-session.XXXXXX")"
-          chmod 700 "$OCTOSCRIBE_TEMP_DIR"
-
           OCTOSCRIBE_SESSION_B64="$INPUT_TELEGRAM_SESSION_B64" \
             python3 - "$OCTOSCRIBE_TEMP_DIR/octoscribe.session" <<'PY'
         import base64
         import os
         import sys
         from pathlib import Path
-
         destination = Path(sys.argv[1])
         encoded = "".join(os.environ["OCTOSCRIBE_SESSION_B64"].split())
         try:
@@ -331,15 +351,15 @@ runs:
         destination.write_bytes(payload)
         destination.chmod(0o600)
         PY
+        fi
 
-          python3 - "$INPUT_CONFIG_PATH" \
-            "$OCTOSCRIBE_TEMP_DIR/octoscribe-runtime.ini" \
-            "$OCTOSCRIBE_TEMP_DIR" <<'PY'
+        python3 - "$INPUT_CONFIG_PATH" "$OCTOSCRIBE_TEMP_DIR/octoscribe-runtime.ini" \
+          "$OCTOSCRIBE_TEMP_DIR" "$INPUT_LOCAL_MODEL" "$INPUT_LOCAL_DEVICE" \
+          "$INPUT_LOCAL_COMPUTE_TYPE" <<'PY'
         import configparser
         import sys
         from pathlib import Path
-
-        source, destination, session_dir = sys.argv[1:]
+        source, destination, session_dir, model, device, compute_type = sys.argv[1:]
         config = configparser.ConfigParser(interpolation=None)
         if source:
             source_path = Path(source)
@@ -350,30 +370,27 @@ runs:
         if not config.has_section("paths"):
             config.add_section("paths")
         config.set("paths", "session_dir", session_dir)
-        with Path(destination).open("w", encoding="utf-8") as handle:
+        if not config.has_section("local_transcribe"):
+            config.add_section("local_transcribe")
+        config.set("local_transcribe", "model", model)
+        config.set("local_transcribe", "device", device)
+        config.set("local_transcribe", "compute_type", compute_type)
+        destination_path = Path(destination)
+        with destination_path.open("w", encoding="utf-8") as handle:
             config.write(handle)
+        destination_path.chmod(0o600)
         PY
-          CONFIG_PATH="$OCTOSCRIBE_TEMP_DIR/octoscribe-runtime.ini"
-        fi
-
-        # Never expose or forward the encoded session after the explicit,
-        # temporary decode above.
+        CONFIG_PATH="$OCTOSCRIBE_TEMP_DIR/octoscribe-runtime.ini"
         unset INPUT_TELEGRAM_SESSION_B64 TELEGRAM_SESSION_B64
 
-        CMD=(python3 "$OCTOSCRIBE_ACTION_PATH/octoscribe.py")
-        if [ -n "$CONFIG_PATH" ]; then
-          CMD+=(--config "$CONFIG_PATH")
-        fi
-        if [ "$INPUT_VERBOSE" = 'true' ]; then
-          CMD+=(--verbose)
-        fi
-        if [ -n "$INPUT_AUDIO_REPO_PATH" ]; then
+        CMD=(python3 "$OCTOSCRIBE_ACTION_PATH/octoscribe.py" --config "$CONFIG_PATH")
+        if [ "$INPUT_VERBOSE" = 'true' ]; then CMD+=(--verbose); fi
+        if [ -n "$INPUT_DATA_REPO_PATH" ]; then
+          CMD+=(--data-repo "$INPUT_DATA_REPO_PATH")
+        else
           CMD+=(--audio-repo "$INPUT_AUDIO_REPO_PATH")
           CMD+=(--transcript-repo "$INPUT_TRANSCRIPT_REPO_PATH")
-        else
-          CMD+=(--data-repo "$INPUT_DATA_REPO_PATH")
         fi
-
         CMD+=("$INPUT_COMMAND")
         if [ "$USES_SOURCE" = true ]; then
           CMD+=(--source "$INPUT_SOURCE")
@@ -392,12 +409,59 @@ runs:
           if [ -n "$INPUT_PRIMARY_PROVIDER" ]; then
             CMD+=(--primary-provider "$INPUT_PRIMARY_PROVIDER")
           fi
-        fi
-        if [ "$INPUT_NO_PUSH" = 'true' ] && [ "$INPUT_COMMAND" = 'run' ]; then
-          CMD+=(--no-push)
+          if [ -n "$INPUT_AUDIO_REVISION" ]; then
+            CMD+=(--audio-revision "$INPUT_AUDIO_REVISION")
+          fi
+          if [ -n "$INPUT_AUDIO_REPOSITORY_BRANCH" ]; then
+            CMD+=(--audio-repository-branch "$INPUT_AUDIO_REPOSITORY_BRANCH")
+          fi
         fi
 
+        echo "OctoScribe command=$INPUT_COMMAND source=$INPUT_SOURCE"
+        if [ -n "$INPUT_DATA_REPO_PATH" ]; then
+          echo "OctoScribe layout=shared data_path=$INPUT_DATA_REPO_PATH"
+        else
+          echo "OctoScribe layout=split audio_path=$INPUT_AUDIO_REPO_PATH transcript_path=$INPUT_TRANSCRIPT_REPO_PATH"
+        fi
+        if [ "$INPUT_COMMAND" = 'run' ] || [ "$INPUT_COMMAND" = 'transcribe' ]; then
+          echo "OctoScribe providers=${INPUT_PROVIDERS:-auto} primary=${INPUT_PRIMARY_PROVIDER:-auto} model=$TRANSCRIBE_MODEL language=$TRANSCRIBE_LANGUAGE"
+        fi
         printf 'Running:'
         printf ' %q' "${CMD[@]}"
         printf '\n'
         "${CMD[@]}"
+
+        python3 - "$OCTOSCRIBE_ACTION_PATH" "$CONFIG_PATH" \
+          "$INPUT_DATA_REPO_PATH" "$INPUT_AUDIO_REPO_PATH" \
+          "$INPUT_TRANSCRIPT_REPO_PATH" "$GITHUB_OUTPUT" <<'PY'
+        import sys
+        from pathlib import Path
+        action_path, config_path, data_path, audio_path, text_path, output_file = sys.argv[1:]
+        sys.path.insert(0, action_path)
+        from src.config import Config
+        overrides = {}
+        if data_path:
+            overrides["data_repo__path"] = data_path
+        else:
+            overrides["audio_repo__path"] = audio_path
+            overrides["transcript_repo__path"] = text_path
+        config = Config.load(ini_path=config_path, validation_profile="status", **overrides)
+        candidates = (config.transcribe.artifacts_dir
+                      or config.transcribe.transcriptions_dir.parent / "candidates")
+        reports = (config.transcribe.reports_dir
+                   or config.transcribe.transcriptions_dir.parent / "reports")
+        resolved = {
+            "audio_dir": config.download.audio_dir,
+            "manifest_file": config.download.manifest_file,
+            "transcriptions_dir": config.transcribe.transcriptions_dir,
+            "candidates_dir": candidates,
+            "reports_dir": reports,
+        }
+        with Path(output_file).open("a", encoding="utf-8") as handle:
+            for name, value in resolved.items():
+                rendered = str(Path(value).resolve())
+                if "\n" in rendered or "\r" in rendered:
+                    raise SystemExit(f"resolved {name} path contains a line break")
+                handle.write(f"{name}={rendered}\n")
+                print(f"OctoScribe output {name}={rendered}")
+        PY

@@ -7,8 +7,8 @@ audio files and registers them in the manifest so the existing transcription
 pipeline can process them.  It requires no Telegram credentials and no
 Telegram libraries.
 
-Imported files are copied into ``config.download.audio_dir`` (the data
-repository's audio directory) so they are version-controlled and processed
+Imported files are copied into ``config.download.audio_dir`` (the configured
+audio workspace) so the calling workflow can preserve and process them
 exactly like Telegram-sourced audio.  Each entry is keyed by its SHA-256
 content hash, which gives natural deduplication and resume support.
 """
@@ -216,7 +216,11 @@ class FolderImporter:
         # In-run deduplication: another file with identical content was already
         # imported during this run.
         if cfg.download.deduplicate and sha256_hex in self._seen_hashes:
-            log.debug("Duplicate content for %s (hash=%s); skipped", path.name, sha256_hex)
+            log.info(
+                "Skipping duplicate folder audio: source=%s sha256=%s",
+                path,
+                sha256_hex,
+            )
             return "duplicate"
 
         # Resume: this content was imported in a previous run and the copied
@@ -226,7 +230,12 @@ class FolderImporter:
             if entry:
                 filename = entry.get("filename")
                 if filename and (cfg.download.audio_dir / filename).exists():
-                    log.debug("Skipping %s (already imported)", path.name)
+                    log.info(
+                        "Skipping previously imported audio: source=%s output=%s sha256=%s",
+                        path,
+                        cfg.download.audio_dir / filename,
+                        sha256_hex,
+                    )
                     self._seen_hashes.add(sha256_hex)
                     return "skipped"
 
@@ -272,5 +281,11 @@ class FolderImporter:
         }
         self._manifest.mark_downloaded(key, manifest_metadata)
         self._seen_hashes.add(sha256_hex)
-        log.debug("Imported %s → %s", path.name, actual_filename)
+        log.info(
+            "Imported folder audio: source=%s output=%s sha256=%s bytes=%d",
+            path,
+            target_path,
+            sha256_hex,
+            target_path.stat().st_size,
+        )
         return "imported"

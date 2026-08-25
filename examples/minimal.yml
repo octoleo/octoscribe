@@ -1,0 +1,91 @@
+# Minimal OctoScribe workflow
+#
+# This intentionally uses one shared repository, a prepared folder, one OpenAI
+# provider, and one `run` call. It commits only after transcription, so evidence
+# has lower source-revision provenance than examples/full.yml.
+name: Transcribe sermon audio (minimal)
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: octoscribe-minimal-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  transcribe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      # The calling repository supplies ./incoming-audio in this example.
+      - name: Check out prepared audio
+        uses: actions/checkout@v4
+
+      - name: Configure caller Git identity and SSH
+        uses: octoleo/git-user@v2
+        with:
+          gpg-key: ${{ secrets.GPG_KEY }}
+          gpg-user: ${{ secrets.GPG_USER }}
+          ssh-key: ${{ secrets.SSH_KEY }}
+          ssh-pub: ${{ secrets.SSH_PUB }}
+          git-user: ${{ secrets.GIT_USER }}
+          git-email: ${{ secrets.GIT_EMAIL }}
+
+      - name: Clone shared evidence repository
+        env:
+          REPO_OWNER: ${{ vars.DATA_REPO_OWNER }}
+          REPO_NAME: ${{ vars.DATA_REPO_NAME }}
+          REPO_BRANCH: ${{ vars.DATA_REPO_BRANCH || 'main' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          /bin/git clone --branch "$REPO_BRANCH" --single-branch \
+            "git@github.com:${REPO_OWNER}/${REPO_NAME}.git" ./data
+
+      - name: Import and transcribe
+        id: octoscribe
+        continue-on-error: true
+        uses: octoleo/octoscribe@v1
+        with:
+          command: run
+          source: folder
+          source_folder: ./incoming-audio
+          openai_api_key: ${{ secrets.OPENAI_API_KEY }}
+          providers: openai
+          primary_provider: openai
+          transcribe_model: gpt-transcribe
+          transcribe_language: en
+          data_repo_path: ./data
+          verbose: true
+
+      - name: Commit and push OctoScribe output
+        if: ${{ always() }}
+        env:
+          REPO_BRANCH: ${{ vars.DATA_REPO_BRANCH || 'main' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if /bin/git -C ./data status --porcelain --untracked-files=no -- \
+              audio transcriptions candidates reports | grep -q .; then
+            echo 'Refusing to publish modified or deleted immutable evidence.' >&2
+            exit 1
+          fi
+          STAGED=()
+          for PATHSPEC in audio manifest.json transcriptions candidates reports; do
+            [ -e "./data/$PATHSPEC" ] && STAGED+=("$PATHSPEC")
+          done
+          if [ "${#STAGED[@]}" -gt 0 ]; then
+            /bin/git -C ./data add --all -- "${STAGED[@]}"
+          fi
+          if ! /bin/git -C ./data diff --cached --quiet; then
+            /bin/git -C ./data commit -m 'Add OctoScribe transcription output'
+          fi
+          /bin/git -C ./data push origin "HEAD:${REPO_BRANCH}"
+
+      - name: Propagate OctoScribe result
+        if: ${{ always() }}
+        env:
+          OCTOSCRIBE_OUTCOME: ${{ steps.octoscribe.outcome }}
+        shell: bash
+        run: |
+          test "$OCTOSCRIBE_OUTCOME" = success

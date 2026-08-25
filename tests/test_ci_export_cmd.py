@@ -23,12 +23,20 @@ def _make_config(tmp_path: Path, *, session_exists: bool = True) -> MagicMock:
     cfg.telegram.api_hash = "testhash"
     cfg.telegram.phone = "+15550001234"
     cfg.telegram.group = "@test_group"
+    cfg.source.mode = "telegram"
+    cfg.source.folder = None
     cfg.transcribe.api_key = "sk-testkey"
+    cfg.transcribe.xai_api_key = None
+    cfg.transcribe.meta_asr_api_key = None
     cfg.transcribe.backend = "openai"
-    cfg.transcribe.model = "gpt-4o-transcribe"
+    cfg.transcribe.model = "gpt-transcribe"
     cfg.transcribe.language = "en"
-    cfg.data_repo.url = "git@github.com:org/data.git"
-    cfg.data_repo.branch = "main"
+    cfg.transcribe.providers = ("openai",)
+    cfg.transcribe.primary_provider = "openai"
+    cfg.transcribe.xai_base_url = "https://api.x.ai/v1/stt"
+    cfg.transcribe.meta_asr_url = None
+    cfg.transcribe.meta_asr_model = "omniASR_LLM_Unlimited_7B_v2"
+    cfg.transcribe.meta_asr_language = "eng_Latn"
 
     if session_exists:
         session_file = tmp_path / "octoscribe.session"
@@ -108,7 +116,16 @@ class TestCiExportOutput:
         out = capsys.readouterr().out
         assert "TELEGRAM_GROUP" in out
         assert "TRANSCRIBE_BACKEND" in out
-        assert "DATA_REPO_BRANCH" in out
+        assert "OCTOSCRIBE_ASR_PROVIDERS" in out
+
+    def test_source_control_values_are_not_exported(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        self._run(tmp_path, monkeypatch)
+        out = capsys.readouterr().out
+        assert "REPO_URL" not in out
+        assert "REPO_BRANCH" not in out
+        assert "AUTO_PUSH" not in out
 
     def test_session_b64_is_valid_base64(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]

@@ -21,8 +21,9 @@ The implementation is organized around these non-negotiable rules:
 7. Unresolved provider or seam differences become `needs_review`.
 8. Only explicit human comparison against the audio can produce
    `human_verified`.
-9. Audio is committed before dependent transcript evidence in the production
-   `run` path.
+9. OctoScribe performs no Git operations. In the recommended production
+   workflow, the caller commits audio and its manifest checkpoint before
+   invoking transcription with the captured revision and branch.
 
 These controls reduce and expose transcription risk. They do not make a
 machine-only guarantee that every spoken word was recognized correctly.
@@ -32,8 +33,8 @@ machine-only guarantee that every spoken word was recognized correctly.
 ```mermaid
 flowchart TD
     A["Telegram or folder"] --> B["Copy, hash, manifest"]
-    B --> C["Commit source audio"]
-    C --> D["Plan and materialize chunks"]
+    B --> C["Caller checkpoints audio + index"]
+    C --> D["Caller supplies revision; plan chunks"]
     D --> E["One to three ASR providers"]
     E --> F["Compare and bounded retry"]
     F --> G["Deterministic seam"]
@@ -50,7 +51,6 @@ The primary components are:
 | --- | --- |
 | `src/folder.py`, `src/telegram.py` | Acquire audio through interchangeable source adapters. |
 | `src/manifest.py` | Track source identity, transcript provenance, quality state, and failures. |
-| `src/repository.py` | Protect, order, commit, and push audio and text repositories. |
 | `src/transcribe/audio_chunks.py` | Probe audio, detect silence, and materialize deterministic WAV chunks. |
 | `src/transcribe/chunking.py` | Pure chunk-boundary policy and conservative text seam alignment. |
 | `src/transcribe/backends/` | Provider-specific transport and transcript extraction. |
@@ -68,9 +68,11 @@ CLI override > process environment or .env > INI > built-in default
 ```
 
 Credentials are read from environment variables. INI files hold non-secret
-policy such as source mode, model names, chunk dimensions, and repository
-paths. Validation is command-aware: folder acquisition does not require
-Telegram credentials, while Telegram `run`, `download`, and `debug` do.
+policy such as source mode, model names, chunk dimensions, and local workspace
+paths. Repository URLs, branches, and Git credentials are caller concerns and
+are not part of the transcription engine. Validation is command-aware: folder
+acquisition does not require Telegram credentials, while Telegram `run`,
+`download`, and `debug` do.
 
 ### Provider discovery
 
@@ -120,35 +122,40 @@ or directory.
 After acquisition, both sources are indistinguishable to the transcription
 pipeline: each manifest entry points to an audio filename and SHA-256 digest.
 
-## Audio integrity and repository gate
+## Audio integrity and caller-owned publication
 
-Fresh configurations use two worktrees:
+The recommended configuration uses two caller-prepared worktrees:
 
 - the audio repository contains `audio/`;
 - the text repository contains `manifest.json`, `transcriptions/`,
   `candidates/`, and `reports/`.
 
-Legacy shared repositories remain supported when only `[data_repo]` or
-`DATA_REPO_*` is explicitly configured.
+Shared worktrees remain supported when only `[data_repo]` or `DATA_REPO_PATH`
+is configured. These names describe directory layout, not a remote-management
+feature.
 
-`cmd_run` enforces publication order:
+The composite action does not inspect Git state and never clones, pulls,
+commits, or pushes. The full reference workflow owns this production order:
 
-1. prepare and pull both configured repositories;
-2. acquire audio and update the manifest;
-3. reject changes or deletions to previously tracked audio;
-4. commit and, unless disabled, push the audio repository;
-5. verify every downloaded manifest audio file is tracked and clean;
-6. read the audio repository's commit revision;
-7. transcribe with that revision in the evidence report;
-8. commit and push transcript evidence.
+1. use `octoleo/git-user@v2` and clone the desired worktrees and branches;
+2. invoke `download` to acquire audio and save the persistent manifest;
+3. commit and push exact audio bytes; in shared layout checkpoint audio and
+   manifest together;
+4. in split layout, separately commit and push the manifest checkpoint so an
+   ephemeral-runner failure cannot lose downloaded state;
+5. capture the audio commit revision and current branch;
+6. invoke `transcribe` with `audio_revision` and
+   `audio_repository_branch`;
+7. commit and push the manifest, candidates, reports, and published text.
 
-If the audio commit or tracking proof fails, transcription does not begin.
-Immediately before a provider call, `Transcriber` hashes the audio again and
-compares it with the manifest. A changed source fails closed.
+The workflow uses `continue-on-error` only to reach checkpoint steps. It then
+propagates the original action failure after saving available audio, index, or
+provider evidence. This does not convert a failed transcription into success.
 
-Repository helpers also reject tracked `.env` and Telegram session files,
-install local git exclude patterns, enforce the configured branch, disable
-interactive git credential prompts, and apply a bounded git command timeout.
+Immediately before provider work, `Transcriber` hashes audio again and compares
+it with the manifest. A changed source fails closed. When the caller supplies a
+revision, aggregate evidence records it as provenance; OctoScribe does not try
+to discover or validate that revision through Git.
 
 ## Deterministic long-audio processing
 
@@ -166,6 +173,11 @@ For an interior boundary, half the overlap is added on each side. A nearby
 silence is preferred; ties choose the earlier point. If no eligible silence is
 available, the exact target boundary is used. Recordings already below the hard
 maximum use one chunk and therefore need no seam.
+
+A 90-minute recording is therefore processed as a finite sequence of bounded
+chunks rather than one oversized request. Its duration does not change the
+semantic retry limits; each chunk still follows the same one-, two-, or
+three-provider state machine.
 
 Each context window is materialized once as mono 16 kHz, 16-bit PCM WAV. A
 chunk must be non-empty and no larger than the configured 24 MiB policy limit.
@@ -273,19 +285,21 @@ numbers, or recognized Scripture references are marked critical for review.
 
 ## Conservative stitching
 
-Chunk text is assembled from the canonical primary candidates only. For each
-adjacent pair, `stitch_with_alignment()` compares at most 96 tokens from the
-left suffix and right prefix. Production defaults require:
+Chunk text is assembled deterministically from overlapping canonical-primary
+ASR text. It is never sent to a generative editor for rewriting, so stitching
+adds no provider call, no extra model cost, and no hidden opportunity to change
+wording. For each adjacent pair, `stitch_with_alignment()` compares at most 96
+tokens from the left suffix and right prefix. Production defaults require:
 
 - at least six exact normalized token matches;
 - similarity `1.0`, so any insertion, deletion, or substitution rejects the
   seam.
 
-On acceptance, only the matched prefix of the continuation is omitted. The
-left surface is retained byte-for-byte. On rejection, both surfaces are joined
-without deletion, and an overlapped recording becomes `needs_review`. This can
-leave duplicated words in a review copy, which is safer than silently deleting
-possibly spoken words.
+On acceptance, only the proven duplicated prefix of the continuation is
+omitted. The left surface is retained byte-for-byte. On rejection, both
+surfaces are joined without deletion and the recording becomes `needs_review`.
+This can leave duplicated words in a review copy, which is safer than silently
+deleting possibly spoken words.
 
 After stitching, publication normalization is whitespace-only: line endings,
 trailing spaces, and excessive blank lines are made deterministic. Spoken words
@@ -316,7 +330,8 @@ raises an evidence conflict instead of overwriting history.
 The per-recording report contains all chunk attempts, the canonical provider
 and attempt, stage-specific pair comparisons, exact disagreement token spans,
 critical categories, bounded provider failures, seam decisions, final quality
-state, final transcript SHA-256, and the audio repository branch/revision.
+state, final transcript SHA-256, and the caller-supplied audio repository
+branch/revision when available.
 Existing evidence cannot be silently removed or replaced by an update.
 
 The manifest links the published text to its report, records providers,
@@ -343,7 +358,7 @@ forever. It is a quarantine state, not a correctness claim.
   transcript.
 - Chunk size, duration, workers, provider count, retry limits, and timeouts are
   validated before work begins.
-- ffmpeg/ffprobe, HTTP, and git calls have finite timeouts.
+- ffmpeg/ffprobe and HTTP calls have finite timeouts.
 - Provider exception messages are redacted before they enter the manifest.
 - Transcript names are collision-safe, and writes use atomic replacement.
 - Raw candidates and reports are append-only by evidence identity.

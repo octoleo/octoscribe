@@ -1,8 +1,9 @@
 """
 manifest.py — Thread-safe manager for manifest.json.
 
-Tracks download and transcription status per Telegram message ID.
-The manifest lives in the data repository and is version-controlled.
+Tracks acquisition and transcription status for Telegram and folder sources.
+The manifest lives in the caller-supplied evidence workspace so the calling
+workflow can preserve it between runs.
 """
 
 from __future__ import annotations
@@ -31,8 +32,8 @@ class Manifest:
     """
     Thread-safe manager for manifest.json.
 
-    Tracks download and transcription status per Telegram message ID.
-    Lives in the data repository (version-controlled).
+    Tracks acquisition and transcription state for every source item.  It
+    lives in the caller-supplied text/evidence workspace.
 
     All mutation methods are protected by a threading.Lock. Writes are
     atomic (written to a .tmp file then renamed) to prevent corruption on

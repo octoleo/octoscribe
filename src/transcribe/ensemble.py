@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import tempfile
 import hashlib
+import logging
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -39,6 +40,8 @@ from src.transcribe.evidence import (
 )
 from src.transcribe.normalize import normalize_text
 from src.transcribe.provider import ProviderTranscript, run_backend
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,6 +214,23 @@ class EnsembleEngine:
             hard_max_ms=self._config.chunk_max_seconds * 1000,
             silence_search_ms=self._config.silence_search_seconds * 1000,
         )
+        log.info(
+            "Chunk plan: audio=%s sha256=%s duration=%.3fs chunks=%d silences=%d",
+            path,
+            actual_hash,
+            duration_ms / 1000,
+            len(plan),
+            len(silences),
+        )
+        for metadata in plan:
+            log.info(
+                "Chunk boundary: index=%d core=%.3f-%.3fs context=%.3f-%.3fs",
+                metadata.index,
+                metadata.core_start_ms / 1000,
+                metadata.core_end_ms / 1000,
+                metadata.context_start_ms / 1000,
+                metadata.context_end_ms / 1000,
+            )
 
         with tempfile.TemporaryDirectory(prefix="octoscribe-chunks-") as temp_dir:
             materialized = self._audio_tools.materialize(
@@ -228,6 +248,13 @@ class EnsembleEngine:
             processed: list[ChunkOutcome] = []
             prewritten_candidates: list[Path] = []
             for chunk in materialized:
+                log.info(
+                    "Processing chunk: index=%d sha256=%s bytes=%d providers=%s",
+                    chunk.metadata.index,
+                    chunk.sha256,
+                    chunk.size_bytes,
+                    ",".join(self._providers),
+                )
                 try:
                     outcome = self._process_chunk(chunk)
                 except PrimaryProviderError as exc:
@@ -260,6 +287,12 @@ class EnsembleEngine:
             # provider candidates remain byte-for-byte unchanged.
             text = normalize_text(text)
             quality = self._overall_quality(chunk_outcomes, seams)
+            log.info(
+                "Chunk assembly complete: chunks=%d seams=%d quality=%s",
+                len(chunk_outcomes),
+                len(seams),
+                quality.value,
+            )
             report_path: Path | None = None
             candidate_paths: tuple[Path, ...] = ()
             if self._evidence_store is not None:
@@ -513,6 +546,13 @@ class EnsembleEngine:
         failures: dict[str, ProviderFailure] = {}
 
         def listen(name: str) -> ProviderAttempt:
+            log.info(
+                "Provider attempt started: provider=%s attempt=%d role=%s chunk=%s",
+                name,
+                attempt,
+                role,
+                audio_path.name,
+            )
             transcript = run_backend(
                 self._backends[name],
                 audio_path,
@@ -528,12 +568,26 @@ class EnsembleEngine:
                 name = future_names[future]
                 try:
                     successes[name] = future.result()
+                    log.info(
+                        "Provider attempt completed: provider=%s attempt=%d role=%s characters=%d",
+                        name,
+                        attempt,
+                        role,
+                        len(successes[name].transcript.text),
+                    )
                 except Exception as exc:
                     failures[name] = ProviderFailure(
                         name,
                         attempt,
                         role,
                         self._safe_failure(exc),
+                    )
+                    log.warning(
+                        "Provider attempt failed: provider=%s attempt=%d role=%s error=%s",
+                        name,
+                        attempt,
+                        role,
+                        failures[name].error,
                     )
 
         ordered_successes = [successes[name] for name in providers if name in successes]
@@ -560,10 +614,18 @@ class EnsembleEngine:
 
     @staticmethod
     def _compare(attempts: tuple[ProviderAttempt, ...] | list[ProviderAttempt]) -> ConsensusReport:
-        return compare_transcripts(
+        report = compare_transcripts(
             [item.transcript.text for item in attempts],
             labels=[item.provider for item in attempts],
         )
+        log.info(
+            "Provider comparison: providers=%s agree=%s discrepancies=%d critical=%s",
+            ",".join(item.provider for item in attempts),
+            report.all_agree,
+            len(report.discrepancies),
+            report.has_critical_discrepancy,
+        )
+        return report
 
     @staticmethod
     def _chunk_result(
@@ -611,6 +673,12 @@ class EnsembleEngine:
         seams: list[SeamEvidence] = []
         for left, right in zip(chunks, chunks[1:]):
             result = stitch_with_alignment(text, right.canonical_text)
+            log.info(
+                "Chunk seam: left=%d right=%d aligned=%s",
+                left.chunk.metadata.index,
+                right.chunk.metadata.index,
+                result.alignment is not None,
+            )
             seams.append(
                 SeamEvidence(
                     left_chunk=left.chunk.metadata.index,

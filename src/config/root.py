@@ -33,8 +33,6 @@ _SECRET_FIELDS = {
     ("transcribe", "api_key"),
     ("transcribe", "xai_api_key"),
     ("transcribe", "meta_asr_api_key"),
-    ("data_repo", "url"),
-    ("transcript_repo", "url"),
 }
 
 
@@ -65,17 +63,17 @@ class Config:
 
     @property
     def audio_repo(self) -> DataRepoConfig:
-        """Repository containing immutable source audio (legacy: data_repo)."""
+        """Workspace containing immutable source audio (legacy: data_repo)."""
         return self.data_repo
 
     @property
     def text_repo(self) -> DataRepoConfig:
-        """Repository containing transcripts, reports, and the manifest."""
+        """Workspace containing transcripts, reports, and the manifest."""
         return self.transcript_repo or self.data_repo
 
     @property
     def repositories_are_split(self) -> bool:
-        """Whether audio and transcript evidence live in different worktrees."""
+        """Whether audio and transcript evidence use different workspaces."""
         return self.audio_repo.path != self.text_repo.path
 
     # ------------------------------------------------------------------

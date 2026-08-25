@@ -1,26 +1,32 @@
-# Operational reference. Copy examples/full.yml for extensive inline guidance.
-# OctoScribe performs no Git operations; every Git command here is caller-owned.
-name: OctoScribe Pipeline
+# Full OctoScribe workflow
+#
+# Copy this file to .github/workflows/octoscribe.yml in the CALLING repository.
+# Configure the Secrets and Variables listed in README.md. OctoScribe performs
+# no Git operations; every clone, checkpoint, and push below belongs to this
+# caller workflow.
+name: Transcribe sermon audio (full)
 
 on:
-  schedule:
-    - cron: '0 6 * * 1'
   workflow_dispatch:
     inputs:
       repository_layout:
-        description: 'split or shared evidence repositories'
+        description: 'Evidence layout'
         required: true
         default: split
         type: choice
-        options: [split, shared]
+        options:
+          - split
+          - shared
       source_mode:
-        description: 'telegram or prepared folder'
+        description: 'Audio source'
         required: true
         default: telegram
         type: choice
-        options: [telegram, folder]
+        options:
+          - telegram
+          - folder
       source_folder:
-        description: 'Path inside the prepared source checkout'
+        description: 'Prepared folder path when source_mode=folder'
         required: false
         default: ''
         type: string
@@ -29,11 +35,18 @@ on:
         required: false
         default: ''
         type: string
+      primary_provider:
+        description: 'Canonical provider; blank uses first enabled provider'
+        required: false
+        default: ''
+        type: string
       verbose:
-        description: 'Enable detailed action logs'
+        description: 'Enable debug-level OctoScribe logs'
         required: false
         default: false
         type: boolean
+  schedule:
+    - cron: '0 6 * * 1'
 
 permissions:
   contents: read
@@ -44,6 +57,7 @@ concurrency:
 
 jobs:
   transcribe:
+    name: Acquire, checkpoint, and transcribe
     runs-on: ubuntu-latest
     timeout-minutes: 360
     env:
@@ -51,16 +65,16 @@ jobs:
       SOURCE_MODE: ${{ inputs.source_mode || vars.SOURCE_MODE || 'telegram' }}
       SOURCE_FOLDER: ${{ inputs.source_folder || vars.SOURCE_FOLDER || './prepared-source/audio' }}
       PROVIDERS: ${{ inputs.providers || vars.OCTOSCRIBE_ASR_PROVIDERS || '' }}
-      PRIMARY_PROVIDER: ${{ vars.OCTOSCRIBE_PRIMARY_ASR || '' }}
+      PRIMARY_PROVIDER: ${{ inputs.primary_provider || vars.OCTOSCRIBE_PRIMARY_ASR || '' }}
       VERBOSE: ${{ inputs.verbose || vars.OCTOSCRIBE_VERBOSE || 'false' }}
 
     steps:
-      - name: Validate mode
+      - name: Validate selected layout and source
         shell: bash
         run: |
           set -euo pipefail
-          case "$REPOSITORY_LAYOUT" in split|shared) ;; *) exit 2;; esac
-          case "$SOURCE_MODE" in telegram|folder) ;; *) exit 2;; esac
+          case "$REPOSITORY_LAYOUT" in split|shared) ;; *) echo "REPOSITORY_LAYOUT must be split or shared" >&2; exit 2;; esac
+          case "$SOURCE_MODE" in telegram|folder) ;; *) echo "SOURCE_MODE must be telegram or folder" >&2; exit 2;; esac
 
       - name: Check out calling repository
         uses: actions/checkout@v4
@@ -81,57 +95,57 @@ jobs:
           ssh-host: ${{ vars.SSH_HOST || 'github.com' }}
           force: ${{ vars.GIT_USER_FORCE || 'false' }}
 
-      - name: Clone audio repository
+      - name: Clone split audio worktree
         if: ${{ env.REPOSITORY_LAYOUT == 'split' }}
         env:
-          OWNER: ${{ vars.AUDIO_REPO_OWNER }}
-          NAME: ${{ vars.AUDIO_REPO_NAME }}
-          BRANCH: ${{ vars.AUDIO_REPO_BRANCH || 'main' }}
+          REPO_OWNER: ${{ vars.AUDIO_REPO_OWNER }}
+          REPO_NAME: ${{ vars.AUDIO_REPO_NAME }}
+          REPO_BRANCH: ${{ vars.AUDIO_REPO_BRANCH || 'main' }}
         shell: bash
         run: |
           set -euo pipefail
-          test -n "$OWNER" && test -n "$NAME" && test -n "$BRANCH"
-          /bin/git clone --branch "$BRANCH" --single-branch \
-            "git@github.com:${OWNER}/${NAME}.git" ./audio-data
+          test -n "$REPO_OWNER" && test -n "$REPO_NAME" && test -n "$REPO_BRANCH"
+          /bin/git clone --branch "$REPO_BRANCH" --single-branch \
+            "git@github.com:${REPO_OWNER}/${REPO_NAME}.git" ./audio-data
 
-      - name: Clone transcript repository
+      - name: Clone split transcript worktree
         if: ${{ env.REPOSITORY_LAYOUT == 'split' }}
         env:
-          OWNER: ${{ vars.TRANSCRIPT_REPO_OWNER }}
-          NAME: ${{ vars.TRANSCRIPT_REPO_NAME }}
-          BRANCH: ${{ vars.TRANSCRIPT_REPO_BRANCH || 'main' }}
+          REPO_OWNER: ${{ vars.TRANSCRIPT_REPO_OWNER }}
+          REPO_NAME: ${{ vars.TRANSCRIPT_REPO_NAME }}
+          REPO_BRANCH: ${{ vars.TRANSCRIPT_REPO_BRANCH || 'main' }}
         shell: bash
         run: |
           set -euo pipefail
-          test -n "$OWNER" && test -n "$NAME" && test -n "$BRANCH"
-          /bin/git clone --branch "$BRANCH" --single-branch \
-            "git@github.com:${OWNER}/${NAME}.git" ./transcript-data
+          test -n "$REPO_OWNER" && test -n "$REPO_NAME" && test -n "$REPO_BRANCH"
+          /bin/git clone --branch "$REPO_BRANCH" --single-branch \
+            "git@github.com:${REPO_OWNER}/${REPO_NAME}.git" ./transcript-data
 
-      - name: Clone shared repository
+      - name: Clone shared evidence worktree
         if: ${{ env.REPOSITORY_LAYOUT == 'shared' }}
         env:
-          OWNER: ${{ vars.DATA_REPO_OWNER }}
-          NAME: ${{ vars.DATA_REPO_NAME }}
-          BRANCH: ${{ vars.DATA_REPO_BRANCH || 'main' }}
+          REPO_OWNER: ${{ vars.DATA_REPO_OWNER }}
+          REPO_NAME: ${{ vars.DATA_REPO_NAME }}
+          REPO_BRANCH: ${{ vars.DATA_REPO_BRANCH || 'main' }}
         shell: bash
         run: |
           set -euo pipefail
-          test -n "$OWNER" && test -n "$NAME" && test -n "$BRANCH"
-          /bin/git clone --branch "$BRANCH" --single-branch \
-            "git@github.com:${OWNER}/${NAME}.git" ./data
+          test -n "$REPO_OWNER" && test -n "$REPO_NAME" && test -n "$REPO_BRANCH"
+          /bin/git clone --branch "$REPO_BRANCH" --single-branch \
+            "git@github.com:${REPO_OWNER}/${REPO_NAME}.git" ./data
 
       - name: Clone prepared folder source
         if: ${{ env.SOURCE_MODE == 'folder' && vars.SOURCE_REPO_NAME != '' }}
         env:
-          OWNER: ${{ vars.SOURCE_REPO_OWNER }}
-          NAME: ${{ vars.SOURCE_REPO_NAME }}
-          BRANCH: ${{ vars.SOURCE_REPO_BRANCH || 'main' }}
+          REPO_OWNER: ${{ vars.SOURCE_REPO_OWNER }}
+          REPO_NAME: ${{ vars.SOURCE_REPO_NAME }}
+          REPO_BRANCH: ${{ vars.SOURCE_REPO_BRANCH || 'main' }}
         shell: bash
         run: |
           set -euo pipefail
-          test -n "$OWNER" && test -n "$NAME" && test -n "$BRANCH"
-          /bin/git clone --branch "$BRANCH" --single-branch \
-            "git@github.com:${OWNER}/${NAME}.git" ./prepared-source
+          test -n "$REPO_OWNER" && test -n "$REPO_NAME" && test -n "$REPO_BRANCH"
+          /bin/git clone --branch "$REPO_BRANCH" --single-branch \
+            "git@github.com:${REPO_OWNER}/${REPO_NAME}.git" ./prepared-source
 
       - name: Validate prepared folder source
         if: ${{ env.SOURCE_MODE == 'folder' }}
@@ -140,7 +154,9 @@ jobs:
           set -euo pipefail
           test -d "$SOURCE_FOLDER"
 
-      - name: Acquire audio and update index
+      # Acquisition is allowed to fail only long enough for the caller to save
+      # any completed audio and manifest checkpoint from the ephemeral runner.
+      - name: Download or import audio
         id: acquire
         continue-on-error: true
         uses: octoleo/octoscribe@v1
@@ -162,7 +178,7 @@ jobs:
       - name: Publish split audio checkpoint
         if: ${{ always() && env.REPOSITORY_LAYOUT == 'split' }}
         env:
-          BRANCH: ${{ vars.AUDIO_REPO_BRANCH || 'main' }}
+          REPO_BRANCH: ${{ vars.AUDIO_REPO_BRANCH || 'main' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -171,15 +187,18 @@ jobs:
             echo 'Refusing to modify or delete committed source audio.' >&2
             exit 1
           fi
-          [ ! -e ./audio-data/audio ] || /bin/git -C ./audio-data add --all -- audio
-          /bin/git -C ./audio-data diff --cached --quiet || \
+          if [ -e ./audio-data/audio ]; then
+            /bin/git -C ./audio-data add --all -- audio
+          fi
+          if ! /bin/git -C ./audio-data diff --cached --quiet; then
             /bin/git -C ./audio-data commit -m 'Add acquired sermon audio'
-          /bin/git -C ./audio-data push origin "HEAD:${BRANCH}"
+          fi
+          /bin/git -C ./audio-data push origin "HEAD:${REPO_BRANCH}"
 
-      - name: Publish shared audio and index checkpoint
+      - name: Publish shared audio and manifest checkpoint
         if: ${{ always() && env.REPOSITORY_LAYOUT == 'shared' }}
         env:
-          BRANCH: ${{ vars.DATA_REPO_BRANCH || 'main' }}
+          REPO_BRANCH: ${{ vars.DATA_REPO_BRANCH || 'main' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -189,43 +208,55 @@ jobs:
             exit 1
           fi
           STAGED=()
-          [ ! -e ./data/audio ] || STAGED+=(audio)
-          [ ! -e ./data/manifest.json ] || STAGED+=(manifest.json)
-          [ "${#STAGED[@]}" -eq 0 ] || /bin/git -C ./data add --all -- "${STAGED[@]}"
-          /bin/git -C ./data diff --cached --quiet || \
+          [ -e ./data/audio ] && STAGED+=(audio)
+          [ -e ./data/manifest.json ] && STAGED+=(manifest.json)
+          if [ "${#STAGED[@]}" -gt 0 ]; then
+            /bin/git -C ./data add --all -- "${STAGED[@]}"
+          fi
+          if ! /bin/git -C ./data diff --cached --quiet; then
             /bin/git -C ./data commit -m 'Checkpoint acquired sermon audio and index'
-          /bin/git -C ./data push origin "HEAD:${BRANCH}"
+          fi
+          /bin/git -C ./data push origin "HEAD:${REPO_BRANCH}"
 
-      - name: Capture audio revision and branch
+      - name: Capture exact audio provenance
         id: audio
         if: ${{ always() }}
         shell: bash
         run: |
           set -euo pipefail
-          [ "$REPOSITORY_LAYOUT" = split ] && REPOSITORY=./audio-data || REPOSITORY=./data
+          if [ "$REPOSITORY_LAYOUT" = split ]; then
+            REPOSITORY=./audio-data
+          else
+            REPOSITORY=./data
+          fi
           REVISION="$(/bin/git -C "$REPOSITORY" rev-parse HEAD)"
           BRANCH="$(/bin/git -C "$REPOSITORY" branch --show-current)"
+          test -n "$REVISION" && test -n "$BRANCH"
           echo "revision=$REVISION" >> "$GITHUB_OUTPUT"
           echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
           echo "Audio provenance: branch=$BRANCH revision=$REVISION"
 
-      - name: Publish split index checkpoint
+      - name: Publish split manifest checkpoint
         if: ${{ always() && env.REPOSITORY_LAYOUT == 'split' }}
         env:
-          BRANCH: ${{ vars.TRANSCRIPT_REPO_BRANCH || 'main' }}
+          REPO_BRANCH: ${{ vars.TRANSCRIPT_REPO_BRANCH || 'main' }}
         shell: bash
         run: |
           set -euo pipefail
-          [ ! -e ./transcript-data/manifest.json ] || \
+          if [ -e ./transcript-data/manifest.json ]; then
             /bin/git -C ./transcript-data add --all -- manifest.json
-          /bin/git -C ./transcript-data diff --cached --quiet || \
+          fi
+          if ! /bin/git -C ./transcript-data diff --cached --quiet; then
             /bin/git -C ./transcript-data commit -m 'Checkpoint OctoScribe acquisition index'
-          /bin/git -C ./transcript-data push origin "HEAD:${BRANCH}"
+          fi
+          /bin/git -C ./transcript-data push origin "HEAD:${REPO_BRANCH}"
 
-      - name: Propagate acquisition failure after checkpoints
+      - name: Stop after persisting an acquisition failure
         if: ${{ steps.acquire.outcome != 'success' }}
         shell: bash
-        run: exit 1
+        run: |
+          echo 'OctoScribe acquisition failed; completed audio/index changes were persisted.' >&2
+          exit 1
 
       - name: Transcribe committed audio
         id: transcribe
@@ -255,7 +286,9 @@ jobs:
           config_path: ${{ vars.OCTOSCRIBE_CONFIG_PATH || '' }}
           verbose: ${{ env.VERBOSE }}
 
-      - name: Publish transcript evidence
+      # Persist completed candidates and failure evidence even if a later chunk
+      # or provider failed. Only OctoScribe's known evidence roots are staged.
+      - name: Publish transcript and evidence results
         if: ${{ always() && steps.acquire.outcome == 'success' }}
         env:
           SPLIT_BRANCH: ${{ vars.TRANSCRIPT_REPO_BRANCH || 'main' }}
@@ -264,9 +297,11 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$REPOSITORY_LAYOUT" = split ]; then
-            REPOSITORY=./transcript-data; BRANCH="$SPLIT_BRANCH"
+            REPOSITORY=./transcript-data
+            REPO_BRANCH="$SPLIT_BRANCH"
           else
-            REPOSITORY=./data; BRANCH="$SHARED_BRANCH"
+            REPOSITORY=./data
+            REPO_BRANCH="$SHARED_BRANCH"
           fi
           if /bin/git -C "$REPOSITORY" status --porcelain \
               --untracked-files=no -- transcriptions candidates reports | grep -q .; then
@@ -275,16 +310,25 @@ jobs:
           fi
           STAGED=()
           for PATHSPEC in manifest.json transcriptions candidates reports; do
-            [ ! -e "$REPOSITORY/$PATHSPEC" ] || STAGED+=("$PATHSPEC")
+            [ -e "$REPOSITORY/$PATHSPEC" ] && STAGED+=("$PATHSPEC")
           done
-          [ "${#STAGED[@]}" -eq 0 ] || /bin/git -C "$REPOSITORY" add --all -- "${STAGED[@]}"
-          /bin/git -C "$REPOSITORY" diff --cached --quiet || \
+          if [ "${#STAGED[@]}" -gt 0 ]; then
+            /bin/git -C "$REPOSITORY" add --all -- "${STAGED[@]}"
+          fi
+          if ! /bin/git -C "$REPOSITORY" diff --cached --quiet; then
             /bin/git -C "$REPOSITORY" commit -m 'Add OctoScribe transcript evidence'
-          /bin/git -C "$REPOSITORY" push origin "HEAD:${BRANCH}"
+          fi
+          /bin/git -C "$REPOSITORY" push origin "HEAD:${REPO_BRANCH}"
 
       - name: Propagate transcription result
         if: ${{ always() && steps.acquire.outcome == 'success' }}
-        env:
-          OUTCOME: ${{ steps.transcribe.outcome }}
         shell: bash
-        run: test "$OUTCOME" = success
+        env:
+          TRANSCRIBE_OUTCOME: ${{ steps.transcribe.outcome }}
+        run: |
+          set -euo pipefail
+          if [ "$TRANSCRIBE_OUTCOME" != success ]; then
+            echo 'OctoScribe transcription failed; available evidence was persisted.' >&2
+            exit 1
+          fi
+          echo 'OctoScribe transcription and evidence publication completed.'

@@ -90,6 +90,20 @@ class TestChunkPlanning:
             hard_max_ms=DEFAULT_HARD_MAX_MS,
         )
 
+    def test_ninety_minute_sermon_is_gapless_and_request_bounded(self):
+        """The longest expected recording remains lossless and API-safe."""
+        duration_ms = 90 * 60_000
+
+        chunks = plan_chunks(duration_ms)
+
+        assert len(chunks) == 12
+        _assert_plan_invariants(
+            chunks,
+            duration_ms=duration_ms,
+            overlap_ms=DEFAULT_OVERLAP_MS,
+            hard_max_ms=DEFAULT_HARD_MAX_MS,
+        )
+
     def test_selects_nearest_silence_and_breaks_ties_earlier(self):
         nearest = _toy_plan(300, [85, 110])
         tied = _toy_plan(300, [110, 90])

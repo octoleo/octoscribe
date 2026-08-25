@@ -93,12 +93,7 @@ def sample_config(tmp_data_dir: Path) -> Config:
         manifest_file=tmp_data_dir / "manifest.json",
     )
 
-    data_repo = DataRepoConfig(
-        url=None,
-        path=tmp_data_dir,
-        branch="main",
-        auto_push=False,
-    )
+    data_repo = DataRepoConfig(path=tmp_data_dir)
 
     source = SourceConfig(mode="telegram", folder=None, recursive=True)
 

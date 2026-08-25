@@ -49,3 +49,169 @@ jobs:
         with:
           file: ./coverage.xml
           fail_ci_if_error: false
+
+  action-smoke:
+    name: Composite action (${{ matrix.layout }} layout)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        layout: [split, shared]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prohibit repository operations inside OctoScribe
+        shell: bash
+        run: |
+          set -euo pipefail
+          SHIM_DIR="$RUNNER_TEMP/octoscribe-command-shim"
+          mkdir -p "$SHIM_DIR"
+          printf '%s\n' '#!/usr/bin/env bash' \
+            'echo "repository command unexpectedly invoked by OctoScribe" >&2' \
+            'exit 97' > "$SHIM_DIR/git"
+          chmod +x "$SHIM_DIR/git"
+          printf '%s\n' "$SHIM_DIR" >> "$GITHUB_PATH"
+
+      - name: Create deterministic audio and start loopback Meta fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          BASE="$RUNNER_TEMP/octoscribe-smoke"
+          mkdir -p "$BASE/incoming" "$BASE/audio-store" \
+            "$BASE/text-store" "$BASE/shared-store"
+          python3 - "$BASE/incoming/Sermon.wav" <<'PY'
+          import math
+          import struct
+          import sys
+          import wave
+
+          sample_rate = 16_000
+          samples = (
+              struct.pack("<h", int(8_000 * math.sin(2 * math.pi * 440 * i / sample_rate)))
+              for i in range(sample_rate)
+          )
+          with wave.open(sys.argv[1], "wb") as output:
+              output.setnchannels(1)
+              output.setsampwidth(2)
+              output.setframerate(sample_rate)
+              output.writeframes(b"".join(samples))
+          PY
+          python3 tests/action_smoke_server.py \
+            --port 18765 \
+            --transcript 'Faith comes by hearing.' \
+            --model 'meta-smoke-model' \
+            --language 'eng_Latn' \
+            --ready-file "$BASE/server.ready" \
+            > "$BASE/server.log" 2>&1 &
+          printf '%s\n' "$!" > "$BASE/server.pid"
+          for _ in $(seq 1 50); do
+            if [ -f "$BASE/server.ready" ]; then exit 0; fi
+            sleep 0.1
+          done
+          cat "$BASE/server.log"
+          exit 1
+
+      - name: Import folder audio with the composite action
+        id: download
+        uses: ./
+        with:
+          command: download
+          source: folder
+          source_folder: ${{ runner.temp }}/octoscribe-smoke/incoming
+          audio_repo_path: ${{ matrix.layout == 'split' && format('{0}/octoscribe-smoke/audio-store', runner.temp) || '' }}
+          transcript_repo_path: ${{ matrix.layout == 'split' && format('{0}/octoscribe-smoke/text-store', runner.temp) || '' }}
+          data_repo_path: ${{ matrix.layout == 'shared' && format('{0}/octoscribe-smoke/shared-store', runner.temp) || '' }}
+
+      - name: Transcribe through the loopback Meta fixture
+        id: transcribe
+        uses: ./
+        with:
+          command: transcribe
+          providers: meta
+          primary_provider: meta
+          meta_asr_url: http://127.0.0.1:18765
+          meta_asr_model: meta-smoke-model
+          meta_asr_language: eng_Latn
+          transcribe_language: en
+          audio_repo_path: ${{ matrix.layout == 'split' && format('{0}/octoscribe-smoke/audio-store', runner.temp) || '' }}
+          transcript_repo_path: ${{ matrix.layout == 'split' && format('{0}/octoscribe-smoke/text-store', runner.temp) || '' }}
+          data_repo_path: ${{ matrix.layout == 'shared' && format('{0}/octoscribe-smoke/shared-store', runner.temp) || '' }}
+          audio_revision: 0123456789abcdef0123456789abcdef01234567
+          audio_repository_branch: fixture/main
+
+      - name: Verify transcript, hashes, provenance, outputs, and no repository metadata
+        shell: bash
+        env:
+          LAYOUT: ${{ matrix.layout }}
+          AUDIO_DIR: ${{ steps.transcribe.outputs.audio_dir }}
+          MANIFEST_FILE: ${{ steps.transcribe.outputs.manifest_file }}
+          TRANSCRIPTIONS_DIR: ${{ steps.transcribe.outputs.transcriptions_dir }}
+          CANDIDATES_DIR: ${{ steps.transcribe.outputs.candidates_dir }}
+          REPORTS_DIR: ${{ steps.transcribe.outputs.reports_dir }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          base = Path(os.environ["RUNNER_TEMP"]) / "octoscribe-smoke"
+          audio_dir = Path(os.environ["AUDIO_DIR"])
+          manifest_path = Path(os.environ["MANIFEST_FILE"])
+          transcriptions_dir = Path(os.environ["TRANSCRIPTIONS_DIR"])
+          candidates_dir = Path(os.environ["CANDIDATES_DIR"])
+          reports_dir = Path(os.environ["REPORTS_DIR"])
+          text_root = base / ("text-store" if os.environ["LAYOUT"] == "split" else "shared-store")
+          audio_root = base / ("audio-store" if os.environ["LAYOUT"] == "split" else "shared-store")
+
+          assert audio_dir == audio_root / "audio"
+          assert manifest_path == text_root / "manifest.json"
+          assert transcriptions_dir == text_root / "transcriptions"
+          assert candidates_dir == text_root / "candidates"
+          assert reports_dir == text_root / "reports"
+
+          source = base / "incoming" / "Sermon.wav"
+          copied = audio_dir / "Sermon.wav"
+          source_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+          assert hashlib.sha256(copied.read_bytes()).hexdigest() == source_hash
+
+          transcript_files = list(transcriptions_dir.glob("*.txt"))
+          assert len(transcript_files) == 1
+          expected = "Faith comes by hearing."
+          assert transcript_files[0].read_text(encoding="utf-8") == expected
+          transcript_hash = hashlib.sha256(expected.encode()).hexdigest()
+
+          manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+          assert len(manifest) == 1
+          entry = next(iter(manifest.values()))
+          assert entry["hash"] == source_hash
+          result = entry["transcription"]
+          assert result["status"] == "machine_transcribed"
+          assert result["transcript_sha256"] == transcript_hash
+          assert result["audio_revision"] == "0123456789abcdef0123456789abcdef01234567"
+          assert result["audio_repository_branch"] == "fixture/main"
+
+          reports = list(reports_dir.glob("*.json"))
+          candidates = list(candidates_dir.rglob("*.json"))
+          assert len(reports) == 1
+          assert candidates
+          report = json.loads(reports[0].read_text(encoding="utf-8"))
+          assert report["final_transcript_sha256"] == transcript_hash
+          assert report["audio_repository"] == {
+              "branch": "fixture/main",
+              "revision": "0123456789abcdef0123456789abcdef01234567",
+          }
+          assert not list(base.rglob(".git"))
+          PY
+
+      - name: Show fixture logs
+        if: always()
+        shell: bash
+        run: |
+          BASE="$RUNNER_TEMP/octoscribe-smoke"
+          if [ -f "$BASE/server.log" ]; then cat "$BASE/server.log"; fi
+          if [ -f "$BASE/server.pid" ]; then
+            kill "$(cat "$BASE/server.pid")" 2>/dev/null || true
+          fi

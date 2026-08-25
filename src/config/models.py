@@ -112,9 +112,10 @@ class TranscribeConfig:
 
 @dataclass
 class DataRepoConfig:
-    """Git data-repository settings."""
+    """Filesystem workspace supplied by the calling process or workflow.
 
-    url: Optional[str]   # from env DATA_REPO_URL
-    path: Path           # local clone path
-    branch: str
-    auto_push: bool
+    OctoScribe deliberately knows only the resolved local path.  Cloning,
+    committing, and publishing that path are responsibilities of the caller.
+    """
+
+    path: Path

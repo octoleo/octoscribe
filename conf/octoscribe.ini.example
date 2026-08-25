@@ -6,8 +6,8 @@
 #
 #   cp conf/octoscribe.ini.example conf/octoscribe.ini
 #
-# Keep API keys, tokens, phone numbers, and repository URLs in .env or the CI
-# secret store. Never place secrets or Telegram sessions in an evidence repo.
+# Keep API keys, tokens, and phone numbers in .env or the CI secret store.
+# Never place secrets or Telegram sessions in an evidence worktree.
 #
 # To use a non-default configuration file:
 #   OCTOSCRIBE_CONFIG=/path/to/custom.ini python octoscribe.py run
@@ -144,29 +144,25 @@ vad_speech_pad_ms = 400
 
 
 # -----------------------------------------------------------------------------
-# Separate evidence repositories (recommended)
+# Caller-owned evidence paths (split layout recommended)
 # -----------------------------------------------------------------------------
-# Large immutable audio and text evidence have independent git histories.
-# Remote URLs belong in AUDIO_REPO_URL and TRANSCRIPT_REPO_URL in .env.
+# These are local directories only. OctoScribe never clones, pulls, commits, or
+# pushes them. A calling workflow owns Git and passes already-cloned worktrees.
+# Keeping immutable audio and text evidence separate avoids bloating text
+# history while retaining a persistent manifest beside transcript evidence.
 [audio_repo]
 
 path = ~/.octoscribe/audio-data
-branch = main
-auto_push = true
 
 [transcript_repo]
 
 path = ~/.octoscribe/transcript-data
-branch = main
-auto_push = true
 
-# Legacy shared-repository deployments remain supported. To keep the historical
-# layout, remove/comment [audio_repo] and [transcript_repo], then uncomment:
+# Shared-directory deployments remain supported. To use one worktree, remove
+# or comment [audio_repo] and [transcript_repo], then uncomment:
 #
 # [data_repo]
 # path = ~/.octoscribe/data
-# branch = main
-# auto_push = true
 
 
 # -----------------------------------------------------------------------------
@@ -184,6 +180,6 @@ artifacts_dir = candidates
 reports_dir = reports
 
 # Telegram's SQLite session is a credential. Keep this absolute path outside
-# both evidence repositories. The GitHub Action overrides it with a temporary,
+# both evidence worktrees. The GitHub Action overrides it with a temporary,
 # permission-restricted runner path and removes it after execution.
 session_dir = ~/.octoscribe/session

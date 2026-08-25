@@ -113,18 +113,12 @@ vad_speech_pad_ms = 400
 
 [data_repo]
 path = ~/.octoscribe/data
-branch = main
-auto_push = true
 
 [audio_repo]
 path = ~/.octoscribe/audio-data
-branch = main
-auto_push = true
 
 [transcript_repo]
 path = ~/.octoscribe/transcript-data
-branch = main
-auto_push = true
 
 [paths]
 audio_dir = audio
@@ -169,9 +163,9 @@ class _ConfigLoader:
         ini = self._parse_ini(resolved_ini_path)
 
         # Step 4 – build each sub-config.
-        # Repositories must be built first because path-bearing sections use
-        # their worktrees as resolution roots.  Audio is immutable evidence;
-        # transcripts, reports, and the manifest live in the text repository.
+        # Workspaces must be built first because path-bearing sections use
+        # them as resolution roots.  Audio is immutable evidence; transcripts,
+        # reports, and the manifest live in the text workspace.
         # source must be built before telegram so we know whether Telegram
         # credentials are required (they are not in folder mode).
         data_repo, transcript_repo = self._build_repositories(ini)
@@ -408,18 +402,18 @@ class _ConfigLoader:
     def _build_repositories(
         self, ini: configparser.ConfigParser
     ) -> tuple[DataRepoConfig, DataRepoConfig]:
-        """Build audio and transcript repositories with legacy migration.
+        """Build audio and transcript workspaces with legacy path migration.
 
-        A user-supplied ``[data_repo]`` section (or DATA_REPO_* environment
-        variables) keeps the historical combined layout unless either new
-        repository is explicitly configured.  Fresh configurations default to
-        two worktrees so large audio history never bloats transcript history.
+        A user-supplied ``[data_repo]`` section (or ``DATA_REPO_PATH``) keeps
+        the historical combined layout unless either new workspace path is
+        explicitly configured.  Repository checkout and publication are
+        intentionally outside OctoScribe.
         """
 
         legacy_explicit = (
             self._user_ini.has_section("data_repo")
             or any(k.startswith("data_repo__") for k in self._overrides)
-            or bool(os.environ.get("DATA_REPO_URL") or os.environ.get("DATA_REPO_PATH"))
+            or bool(os.environ.get("DATA_REPO_PATH"))
         )
         split_explicit = (
             self._user_ini.has_section("audio_repo")
@@ -429,15 +423,13 @@ class _ConfigLoader:
                 for k in self._overrides
             )
             or bool(
-                os.environ.get("AUDIO_REPO_URL")
-                or os.environ.get("AUDIO_REPO_PATH")
-                or os.environ.get("TRANSCRIPT_REPO_URL")
+                os.environ.get("AUDIO_REPO_PATH")
                 or os.environ.get("TRANSCRIPT_REPO_PATH")
             )
         )
 
         if legacy_explicit and not split_explicit:
-            legacy = self._build_repository(
+            legacy = self._build_workspace(
                 ini,
                 section="data_repo",
                 env_prefix="DATA_REPO",
@@ -445,13 +437,13 @@ class _ConfigLoader:
             )
             return legacy, legacy
 
-        audio = self._build_repository(
+        audio = self._build_workspace(
             ini,
             section="audio_repo",
             env_prefix="AUDIO_REPO",
             default_path="~/.octoscribe/audio-data",
         )
-        transcript = self._build_repository(
+        transcript = self._build_workspace(
             ini,
             section="transcript_repo",
             env_prefix="TRANSCRIPT_REPO",
@@ -459,7 +451,7 @@ class _ConfigLoader:
         )
         return audio, transcript
 
-    def _build_repository(
+    def _build_workspace(
         self,
         ini: configparser.ConfigParser,
         *,
@@ -467,38 +459,14 @@ class _ConfigLoader:
         env_prefix: str,
         default_path: str,
     ) -> DataRepoConfig:
-        url = self._override(
-            section,
-            "url",
-            os.environ.get(f"{env_prefix}_URL")
-            or ini.get(section, "url", fallback="")
-            or None,
-        )
         path_raw = self._override(
             section,
             "path",
             os.environ.get(f"{env_prefix}_PATH")
             or ini.get(section, "path", fallback=default_path),
         )
-        branch = self._override(
-            section,
-            "branch",
-            os.environ.get(f"{env_prefix}_BRANCH")
-            or ini.get(section, "branch", fallback="main"),
-        )
-        auto_push = _parse_bool(
-            self._override(
-                section,
-                "auto_push",
-                os.environ.get(f"{env_prefix}_AUTO_PUSH")
-                or ini.get(section, "auto_push", fallback="true"),
-            )
-        )
         return DataRepoConfig(
-            url=str(url) if url else None,
             path=Path(str(path_raw)).expanduser().resolve(),
-            branch=str(branch),
-            auto_push=auto_push,
         )
 
     def _build_download(
@@ -869,7 +837,6 @@ class _ConfigLoader:
             "run",
             "download",
             "transcribe",
-            "sync",
             "status",
             "debug",
             "ci-export",
@@ -1051,32 +1018,6 @@ class _ConfigLoader:
         if not (0 <= transcribe.arbitration_limit <= 1):
             errors.append("quality arbitration_limit must be 0 or 1.")
 
-        for label, repo in (
-            ("audio_repo", data_repo),
-            ("transcript_repo", transcript_repo),
-        ):
-            if repo.url:
-                parsed_repo_url = urllib.parse.urlsplit(repo.url)
-                if parsed_repo_url.username or parsed_repo_url.password:
-                    errors.append(
-                        f"{label}.url must not embed credentials; use an SSH agent "
-                        "or credential helper."
-                    )
-            branch = repo.branch
-            if (
-                not branch
-                or branch.startswith("-")
-                or branch.endswith(("/", ".", ".lock"))
-                or any(token in branch for token in ("..", "//", "@{"))
-                or any(
-                    character.isspace()
-                    or ord(character) < 32
-                    or character in "~^:?*[\\"
-                    for character in branch
-                )
-            ):
-                errors.append(f"{label}.branch is not a safe Git branch name.")
-
         audio_root = data_repo.path.resolve()
         text_root = transcript_repo.path.resolve()
         if audio_root != text_root and (
@@ -1085,7 +1026,7 @@ class _ConfigLoader:
         ):
             errors.append(
                 "audio_repo.path and transcript_repo.path must not be nested; "
-                "use separate worktrees (or the exact same path for legacy mode)."
+                "use separate workspaces (or the exact same path for shared mode)."
             )
 
         path_ownership = (
@@ -1103,13 +1044,13 @@ class _ConfigLoader:
             if path is not None and not _is_within(path, root):
                 errors.append(
                     f"{label} must remain inside its configured evidence "
-                    f"repository ({root})."
+                    f"workspace ({root})."
                 )
 
         if errors:
             _die(errors)
 
-        # Non-fatal warning: evidence repositories inside the project directory.
+        # Non-fatal warning: evidence workspaces inside the project directory.
         # __file__ is src/config/loader.py, so the project root is three
         # levels up (src/config -> src -> project root).
         project_dir = Path(__file__).resolve().parents[2]
@@ -1118,7 +1059,8 @@ class _ConfigLoader:
                 repo.path.relative_to(project_dir)
                 warnings.warn(
                     f"{label}.path ({repo.path}) is inside the project directory "
-                    f"({project_dir}). Consider using a path outside the project tree.",
+                    f"({project_dir}). In workflows, prefer a separately checked-out "
+                    "workspace path.",
                     stacklevel=4,
                 )
             except ValueError:

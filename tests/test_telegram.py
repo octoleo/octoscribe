@@ -140,7 +140,7 @@ def minimal_config(tmp_path: Path):
         transcriptions_dir=tmp_path / "transcriptions",
         manifest_file=tmp_path / "manifest.json",
     )
-    dr = DataRepoConfig(url=None, path=tmp_path / "data", branch="main", auto_push=False)
+    dr = DataRepoConfig(path=tmp_path / "data")
     return Config(telegram=tg, download=dl, transcribe=tr, data_repo=dr, ini_path=tmp_path / "octoscribe.ini")
 
 
@@ -707,12 +707,7 @@ class TestRestoreSessionFromEnv:
             transcriptions_dir=tmp_path / "transcriptions",
             manifest_file=tmp_path / "manifest.json",
         )
-        dr_cfg = DataRepoConfig(
-            url=None,
-            path=tmp_path,
-            branch="main",
-            auto_push=False,
-        )
+        dr_cfg = DataRepoConfig(path=tmp_path)
         config = Config(
             telegram=tg_cfg,
             download=dl_cfg,

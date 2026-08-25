@@ -290,6 +290,13 @@ class Transcriber:
             # name, disambiguate the later one rather than overwrite it.
             desired_name = self._output_filename(audio_path, title)
             actual_audio_hash = sha256_file(audio_path)
+            log.info(
+                "Processing audio evidence: msg_id=%s file=%s sha256=%s bytes=%d",
+                msg_id,
+                audio_path,
+                actual_audio_hash,
+                audio_path.stat().st_size,
+            )
             recorded_hash = entry.get("hash")
             if (
                 isinstance(recorded_hash, str)
@@ -407,7 +414,14 @@ class Transcriber:
             self._manifest.mark_transcribed(msg_id, manifest_result)
 
             log.info(
-                "Transcribed %s -> %s (%.1fs)", filename, output_filename, elapsed
+                "Transcription result: input=%s output=%s quality=%s "
+                "unresolved_discrepancies=%d report=%s elapsed=%.1fs",
+                filename,
+                output_filename,
+                quality_state or "machine_transcribed",
+                unresolved,
+                evidence_report or "(none)",
+                elapsed,
             )
             return TranscriptionResult(
                 msg_id=msg_id,

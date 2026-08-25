@@ -426,7 +426,11 @@ class TelegramDownloader:
                 if entry:
                     filename = entry.get("filename")
                     if filename and (cfg.download.audio_dir / filename).exists():
-                        log.debug("Skipping msg %d (already downloaded)", msg_id)
+                        log.info(
+                            "Skipping previously downloaded Telegram audio: message_id=%d output=%s",
+                            msg_id,
+                            cfg.download.audio_dir / filename,
+                        )
                         return "skipped"
 
             metadata = get_audio_metadata(msg)
@@ -462,8 +466,8 @@ class TelegramDownloader:
                         and existing_entry.get("downloaded")
                     ):
                         downloaded_path.unlink(missing_ok=True)
-                        log.debug(
-                            "Duplicate detected for msg %d (hash=%s); file removed",
+                        log.info(
+                            "Skipping duplicate Telegram audio: message_id=%d sha256=%s",
                             msg_id,
                             sha256_hex,
                         )
@@ -484,5 +488,11 @@ class TelegramDownloader:
                 "original_filename": metadata.original_filename,
             }
             self._manifest.mark_downloaded(msg_id, manifest_metadata)
-            log.debug("Downloaded msg %d → %s", msg_id, actual_filename)
+            log.info(
+                "Downloaded Telegram audio: message_id=%d output=%s sha256=%s bytes=%d",
+                msg_id,
+                downloaded_path,
+                sha256_hex,
+                downloaded_path.stat().st_size,
+            )
             return "downloaded"

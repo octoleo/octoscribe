@@ -156,22 +156,22 @@ class TestEnvVarLoading:
         assert cfg.telegram.phone == "+27820001234"
         assert cfg.transcribe.api_key == "sk-env-key"
 
-    def test_data_repo_url_from_env(
+    def test_repository_git_environment_is_not_part_of_config(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """DATA_REPO_URL is optional but loaded from env when present."""
-        _minimal_env(monkeypatch, extra={"DATA_REPO_URL": "git@github.com:org/data.git"})
+        """Source-control settings belong to the calling workflow."""
+        _minimal_env(
+            monkeypatch,
+            extra={
+                "DATA_REPO_URL": "https://example.invalid/data",
+                "DATA_REPO_BRANCH": "external-branch",
+                "DATA_REPO_AUTO_PUSH": "true",
+            },
+        )
         cfg = Config.load(ini_path=tmp_path / "none.ini")
-        assert cfg.data_repo.url == "git@github.com:org/data.git"
-
-    def test_data_repo_url_absent(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """DATA_REPO_URL defaults to None when not set."""
-        _minimal_env(monkeypatch)
-        monkeypatch.delenv("DATA_REPO_URL", raising=False)
-        cfg = Config.load(ini_path=tmp_path / "none.ini")
-        assert cfg.data_repo.url is None
+        assert not hasattr(cfg.data_repo, "url")
+        assert not hasattr(cfg.data_repo, "branch")
+        assert not hasattr(cfg.data_repo, "auto_push")
 
     def test_provider_auto_discovery_uses_only_configured_audio_services(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -237,7 +237,7 @@ class TestEnvVarLoading:
         assert cfg.transcribe.api_key == "openai-override"
         assert cfg.transcribe.xai_api_key == "xai-override"
 
-    def test_new_repository_environment_splits_audio_and_transcripts(
+    def test_workspace_environment_splits_audio_and_transcripts(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _minimal_env(
@@ -315,7 +315,7 @@ class TestCommandValidationProfiles:
         assert cfg.transcribe.providers == ("openai",)
         assert cfg.telegram.api_id is None
 
-    @pytest.mark.parametrize("profile", ["sync", "status", "session", "ci-export"])
+    @pytest.mark.parametrize("profile", ["status", "session", "ci-export"])
     def test_non_processing_commands_require_no_service_credentials(
         self,
         profile: str,
@@ -415,12 +415,10 @@ class TestCliOverrides:
             download__workers=12,
             transcribe__backend="local",
             transcribe__language="fr",
-            data_repo__branch="develop",
         )
         assert cfg.download.workers == 12
         assert cfg.transcribe.backend == "local"
         assert cfg.transcribe.language == "fr"
-        assert cfg.data_repo.branch == "develop"
 
     def test_override_group_plain_key(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -698,7 +696,7 @@ class TestDataRepoPath:
 
 
 class TestEvidencePathContainment:
-    def test_rejects_nested_split_repositories(
+    def test_rejects_nested_split_workspaces(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _minimal_env(monkeypatch)
@@ -719,7 +717,7 @@ class TestEvidencePathContainment:
             "paths__reports_dir",
         ],
     )
-    def test_rejects_evidence_paths_outside_owning_repository(
+    def test_rejects_evidence_paths_outside_owning_workspace(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -736,16 +734,6 @@ class TestEvidencePathContainment:
 
 
 class TestSecuritySensitiveValidation:
-    def test_rejects_unsafe_repository_branch_name(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        _minimal_env(monkeypatch)
-        with pytest.raises(SystemExit):
-            Config.load(
-                ini_path=tmp_path / "none.ini",
-                audio_repo__branch="../unexpected",
-            )
-
     def test_meta_provider_requires_language_identifier(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
