@@ -213,12 +213,12 @@ def test_ci_executes_the_real_action_offline_in_both_layouts() -> None:
 def test_real_audio_workflow_is_a_pure_action_consumer() -> None:
     assert "workflow_dispatch:" in REAL_AUDIO
     assert "branches: [v1]" in REAL_AUDIO
-    assert "types: [opened, synchronize, reopened, closed]" in REAL_AUDIO
+    assert "types: [closed]" in REAL_AUDIO
     assert (
         "github.event_name == 'workflow_dispatch' || "
-        "github.event.action != 'closed' || "
         "github.event.pull_request.merged == true"
     ) in REAL_AUDIO
+    assert "synchronize" not in REAL_AUDIO
     assert REAL_AUDIO.count("uses: ./") == 2
     assert "command: transcribe" in REAL_AUDIO
     assert "command: verify" in REAL_AUDIO
