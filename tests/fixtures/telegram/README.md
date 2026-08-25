@@ -44,6 +44,15 @@ explicitly. Fully aligned seams publish as
 `completed_with_warnings`. Both results remain under `transcriptions/`; neither
 is withheld or moved to a separate output area.
 
+The verifier itself remains strict by default (`max_word_error_rate: 0`). This
+paid regression workflow explicitly uses a narrow `0.0025` (0.25%) ceiling for
+each transcript because API output can vary slightly from its machine-generated
+reference. Reports still record `exact_spoken_word_match`, exact word/error
+counts, the WER, and every individual difference. Numeric-token and common
+negation differences fail regardless of the configured ceiling, as do missing
+generated or reference files. Tolerance changes only the workflow pass/fail
+gate; it never changes, suppresses, or rewrites transcript text.
+
 The direct verifier command supplies `--transcript-path`, `--reference-path`,
 and `--comparison-report-path` before `verify`.
 `--allow-missing-references --capture-reference` is limited to intentional

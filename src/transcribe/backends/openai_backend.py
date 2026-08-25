@@ -83,6 +83,12 @@ class OpenAIBackend(TranscriptionBackend):
                     "file": audio_file,
                     "model": cfg.model,
                     "prompt": VERBATIM_PROMPT,
+                    # Use the API's lowest-randomness setting for every
+                    # supported OpenAI transcription model.  The service may
+                    # still raise temperature automatically when log-
+                    # probability thresholds are reached, so this reduces
+                    # variability without claiming perfect determinism.
+                    "temperature": 0,
                 }
                 if cfg.model == "gpt-transcribe":
                     # The current API accepts a ranked language list.  Do not

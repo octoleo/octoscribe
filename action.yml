@@ -134,13 +134,17 @@ inputs:
     required: false
     default: ''
   reference_required:
-    description: 'Fail verify when a generated transcript has no reference'
+    description: 'Reference requirement recorded in verify reports; missing evidence never passes'
     required: false
     default: 'true'
   capture_reference:
     description: 'Manual bootstrap: capture generated text into an empty reference_path'
     required: false
     default: 'false'
+  max_word_error_rate:
+    description: 'Verify tolerance from 0 to 1; default is exact spoken-word matching'
+    required: false
+    default: ''
   command:
     description: 'Pipeline command: run | download | transcribe | verify | status'
     required: false
@@ -282,6 +286,7 @@ runs:
         INPUT_COMPARISON_REPORT_PATH: ${{ inputs.comparison_report_path }}
         INPUT_REFERENCE_REQUIRED: ${{ inputs.reference_required }}
         INPUT_CAPTURE_REFERENCE: ${{ inputs.capture_reference }}
+        INPUT_MAX_WORD_ERROR_RATE: ${{ inputs.max_word_error_rate }}
         INPUT_COMMAND: ${{ inputs.command }}
         INPUT_CONFIG_PATH: ${{ inputs.config_path }}
         INPUT_VERBOSE: ${{ inputs.verbose }}
@@ -296,6 +301,7 @@ runs:
         EFFECTIVE_MANIFEST_PATH="${INPUT_MANIFEST_PATH:-${MANIFEST_PATH:-./manifest.json}}"
         EFFECTIVE_REFERENCE_PATH="${INPUT_REFERENCE_PATH:-${REFERENCE_PATH:-}}"
         EFFECTIVE_COMPARISON_REPORT_PATH="${INPUT_COMPARISON_REPORT_PATH:-${COMPARISON_REPORT_PATH:-}}"
+        EFFECTIVE_MAX_WORD_ERROR_RATE="${INPUT_MAX_WORD_ERROR_RATE:-${MAX_WORD_ERROR_RATE:-0}}"
 
         case "$INPUT_COMMAND" in
           run|download|transcribe|verify|status) ;;
@@ -496,6 +502,7 @@ runs:
             CMD+=(--audio-repository-branch "$INPUT_AUDIO_REPOSITORY_BRANCH")
           fi
         elif [ "$INPUT_COMMAND" = 'verify' ]; then
+          CMD+=(--max-word-error-rate "$EFFECTIVE_MAX_WORD_ERROR_RATE")
           if [ "$INPUT_REFERENCE_REQUIRED" = 'false' ]; then
             CMD+=(--allow-missing-references)
           fi

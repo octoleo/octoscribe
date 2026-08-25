@@ -48,6 +48,7 @@ jobs:
         with:
           command: verify
           reference_required: true
+          max_word_error_rate: 0.0025
 
       - name: Upload generated transcripts and comparison evidence
         if: always()

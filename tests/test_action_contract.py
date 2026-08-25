@@ -54,6 +54,14 @@ def test_action_path_layout_is_explicit_and_unambiguous() -> None:
     assert "use data_repo_path for a shared layout" in ACTION
 
 
+def test_action_exposes_strict_by_default_verification_tolerance() -> None:
+    assert "default: ''" in _input_stanza("max_word_error_rate")
+    assert (
+        '${INPUT_MAX_WORD_ERROR_RATE:-${MAX_WORD_ERROR_RATE:-0}}' in ACTION
+    )
+    assert 'CMD+=(--max-word-error-rate "$EFFECTIVE_MAX_WORD_ERROR_RATE")' in ACTION
+
+
 def test_action_exposes_complete_provider_and_provenance_controls() -> None:
     expected = {
         "openai_api_key",
@@ -148,6 +156,7 @@ def test_real_audio_workflow_is_a_pure_action_consumer() -> None:
     assert REAL_AUDIO.count("uses: ./") == 2
     assert "command: transcribe" in REAL_AUDIO
     assert "command: verify" in REAL_AUDIO
+    assert "max_word_error_rate: 0.0025" in REAL_AUDIO
     assert "secrets.OPENAI_API_KEY" in REAL_AUDIO
     assert "AUDIO_PATH: tests/fixtures/telegram/audio" in REAL_AUDIO
     assert "TRANSCRIPT_PATH: tests/fixtures/telegram/transcriptions" in REAL_AUDIO

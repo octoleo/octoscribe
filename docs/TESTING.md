@@ -275,6 +275,23 @@ Validation compares each generated transcript with its committed reference
 word-for-word after normalizing only case, punctuation, and whitespace, and
 reports every added, deleted, or substituted spoken word.
 
+`command: verify` is exact by default: `max_word_error_rate`, the
+`MAX_WORD_ERROR_RATE` environment variable, and the
+`--max-word-error-rate` CLI option all default to `0`. An explicit action input
+takes precedence over the environment variable. A nonzero value does not hide
+or rewrite any difference: each JSON report and standard-output record retains
+the exact-match flag, word counts, additions, deletions, substitutions, WER,
+and the complete word-level diff. Each referenced transcript must independently
+meet the configured rate. Missing generated or reference files always fail.
+Differences involving a numeric token or a common negation always fail even
+when the overall WER is below the configured tolerance.
+
+The paid fixture workflow uses the deliberately narrow value `0.0025` (0.25%)
+to detect material model drift while permitting the few known nondeterministic
+word variations in the machine reference corpus. Its reports still distinguish
+`exact_match`, `mismatch_within_tolerance`, and `mismatch`; passing within
+tolerance is never presented as an exact match.
+
 The workflow uses `tests/fixtures/telegram/reference-transcripts/` for committed
 references and `tests/fixtures/telegram/comparison-reports/` for machine-readable
 diffs. The direct command supplies `--transcript-path`, `--reference-path`, and

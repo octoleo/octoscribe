@@ -226,6 +226,7 @@ def test_openai_backend_transcribe_calls_api(tmp_path: Path):
     assert kwargs["model"] == "gpt-4o-transcribe"
     assert kwargs["language"] == "af"
     assert kwargs["prompt"] == VERBATIM_PROMPT
+    assert kwargs["temperature"] == 0
     assert "response_format" not in kwargs
 
 
@@ -242,6 +243,7 @@ def test_openai_backend_whisper_uses_supported_text_format(tmp_path: Path):
     assert kwargs["model"] == "whisper-1"
     assert kwargs["language"] == "en"
     assert kwargs["response_format"] == "text"
+    assert kwargs["temperature"] == 0
 
 
 def test_openai_backend_uses_current_gpt_transcribe_contract(tmp_path: Path):
@@ -259,8 +261,41 @@ def test_openai_backend_uses_current_gpt_transcribe_contract(tmp_path: Path):
     assert kwargs["model"] == "gpt-transcribe"
     assert kwargs["extra_body"] == {"languages": ["en"]}
     assert kwargs["prompt"] == VERBATIM_PROMPT
+    assert kwargs["temperature"] == 0
     assert "language" not in kwargs
     assert "response_format" not in kwargs
+
+
+@pytest.mark.parametrize(
+    "model, provider_result",
+    [
+        ("gpt-transcribe", SimpleNamespace(text="  Grace--unchanged!  ")),
+        ("gpt-4o-transcribe", {"text": "  Grace--unchanged!  "}),
+        ("gpt-4o-mini-transcribe", {"text": "  Grace--unchanged!  "}),
+        (
+            "gpt-4o-mini-transcribe-2025-12-15",
+            {"text": "  Grace--unchanged!  "},
+        ),
+        ("whisper-1", "  Grace--unchanged!  "),
+    ],
+)
+def test_openai_backend_uses_lowest_temperature_without_rewriting_response(
+    tmp_path: Path,
+    model: str,
+    provider_result: object,
+):
+    cfg = _make_transcribe_config(tmp_path, model=model, language="en")
+    audio_file = _make_audio_file(tmp_path)
+    mock_client = MagicMock()
+    mock_client.audio.transcriptions.create.return_value = provider_result
+
+    result = _make_openai_backend(cfg, mock_client).transcribe(audio_file)
+
+    assert result == "  Grace--unchanged!  "
+    kwargs = mock_client.audio.transcriptions.create.call_args.kwargs
+    assert kwargs["model"] == model
+    assert kwargs["temperature"] == 0
+    assert kwargs["prompt"] == VERBATIM_PROMPT
 
 
 # ---------------------------------------------------------------------------

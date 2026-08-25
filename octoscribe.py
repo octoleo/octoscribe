@@ -203,6 +203,19 @@ def build_overrides(args: argparse.Namespace) -> dict:
     return overrides
 
 
+def _max_word_error_rate_arg(value: str) -> float:
+    """Argparse adapter for the verifier's inclusive 0..1 threshold."""
+    from src.transcript_compare import (
+        ComparisonInputError,
+        validate_max_word_error_rate,
+    )
+
+    try:
+        return validate_max_word_error_rate(value)
+    except ComparisonInputError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
 # ---------------------------------------------------------------------------
 # Argument parser
 # ---------------------------------------------------------------------------
@@ -425,7 +438,10 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_false",
         dest="reference_required",
         default=True,
-        help="Bootstrap only: report missing references without failing.",
+        help=(
+            "Bootstrap provenance only: record references as optional in the "
+            "summary. Missing references still do not verify successfully."
+        ),
     )
     verify_parser.add_argument(
         "--capture-reference",
@@ -433,6 +449,16 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Copy generated transcripts into an empty reference directory; "
             "intended only for deliberate manual baseline capture."
+        ),
+    )
+    verify_parser.add_argument(
+        "--max-word-error-rate",
+        type=_max_word_error_rate_arg,
+        default=os.environ.get("MAX_WORD_ERROR_RATE", "0"),
+        help=(
+            "Maximum accepted word error rate from 0 to 1 (default: "
+            "MAX_WORD_ERROR_RATE or strict 0). Numeric and negation changes "
+            "always fail regardless of this tolerance."
         ),
     )
 
@@ -688,6 +714,7 @@ def cmd_verify(args: argparse.Namespace, config) -> None:
             args.comparison_reports_dir or config.transcribe.comparison_reports_dir,
             reference_required=args.reference_required,
             capture_reference=args.capture_reference,
+            max_word_error_rate=getattr(args, "max_word_error_rate", 0.0),
         )
     except (ComparisonInputError, OSError, ValueError) as exc:
         print(f"ERROR: Transcript verification failed: {exc}", file=sys.stderr)
