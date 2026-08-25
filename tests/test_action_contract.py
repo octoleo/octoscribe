@@ -153,15 +153,11 @@ def test_paid_openai_test_runs_only_after_a_pr_merge_to_v1() -> None:
     assert "ref: ${{ github.event.pull_request.merge_commit_sha }}" in live_job
     assert "audio_revision: ${{ github.event.pull_request.merge_commit_sha }}" in live_job
     assert "audio_repository_branch: ${{ github.event.pull_request.base.ref }}" in live_job
-    assert "Require machine-transcribed outputs and aligned seams" in live_job
+    assert "Validate truthful quality state, evidence, and seams" in live_job
 
 
-def test_paid_openai_verifier_rejects_review_state_and_unaligned_seams() -> None:
+def test_paid_openai_verifier_requires_state_to_match_seam_evidence() -> None:
     verifier = runpy.run_path(str(LIVE_VERIFIER))
-
-    verifier["_require_release_quality_state"]("856", "machine_transcribed")
-    with pytest.raises(AssertionError, match="must finish 'machine_transcribed'"):
-        verifier["_require_release_quality_state"]("856", "needs_review")
 
     raw = "the exact overlap words are retained here"
     transcript_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -195,11 +191,26 @@ def test_paid_openai_verifier_rejects_review_state_and_unaligned_seams() -> None
         "chunks": chunks,
         "seams": [{"left_chunk": 0, "right_chunk": 1, "aligned": True}],
     }
-    verifier["_validate_report_chunks"](report, expected)
+    _, all_seams_aligned = verifier["_validate_report_chunks"](report, expected)
+    assert all_seams_aligned is True
+    verifier["_require_release_quality_state"](
+        "856", "machine_transcribed", all_seams_aligned=True
+    )
+    with pytest.raises(AssertionError, match="expected 'machine_transcribed'"):
+        verifier["_require_release_quality_state"](
+            "856", "needs_review", all_seams_aligned=True
+        )
 
     report["seams"][0]["aligned"] = False
-    with pytest.raises(AssertionError, match="every overlap to align"):
-        verifier["_validate_report_chunks"](report, expected)
+    _, all_seams_aligned = verifier["_validate_report_chunks"](report, expected)
+    assert all_seams_aligned is False
+    verifier["_require_release_quality_state"](
+        "856", "needs_review", all_seams_aligned=False
+    )
+    with pytest.raises(AssertionError, match="expected 'needs_review'"):
+        verifier["_require_release_quality_state"](
+            "856", "machine_transcribed", all_seams_aligned=False
+        )
 
 
 def test_paid_openai_idempotence_pass_cannot_reach_the_cloud() -> None:
