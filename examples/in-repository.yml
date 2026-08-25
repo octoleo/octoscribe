@@ -66,6 +66,11 @@ jobs:
       PROVIDERS: ${{ inputs.providers || vars.OCTOSCRIBE_ASR_PROVIDERS || '' }}
       PRIMARY_PROVIDER: ${{ inputs.primary_provider || vars.OCTOSCRIBE_PRIMARY_ASR || '' }}
       VERBOSE: ${{ inputs.verbose || vars.OCTOSCRIBE_VERBOSE || 'false' }}
+      # These are OctoScribe's defaults. Declare them here only to make the
+      # same-repository layout obvious and easy to override.
+      AUDIO_PATH: ./audio
+      TRANSCRIPT_PATH: ./transcriptions
+      MANIFEST_PATH: ./manifest.json
 
     steps:
       - name: Validate selected source
@@ -113,7 +118,6 @@ jobs:
           telegram_phone: ${{ secrets.TELEGRAM_PHONE }}
           telegram_session_b64: ${{ secrets.TELEGRAM_SESSION_B64 }}
           telegram_group: ${{ vars.TELEGRAM_GROUP }}
-          data_repo_path: .
           config_path: ${{ vars.OCTOSCRIBE_CONFIG_PATH || '' }}
           verbose: ${{ env.VERBOSE }}
 
@@ -176,7 +180,6 @@ jobs:
           local_model: ${{ vars.LOCAL_MODEL || 'large-v3' }}
           local_device: ${{ vars.LOCAL_DEVICE || 'cpu' }}
           local_compute_type: ${{ vars.LOCAL_COMPUTE_TYPE || 'int8' }}
-          data_repo_path: .
           audio_revision: ${{ steps.audio.outputs.revision }}
           audio_repository_branch: ${{ steps.audio.outputs.branch }}
           config_path: ${{ vars.OCTOSCRIBE_CONFIG_PATH || '' }}

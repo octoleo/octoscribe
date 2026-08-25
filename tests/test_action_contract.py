@@ -232,6 +232,23 @@ def test_examples_pass_only_declared_octoscribe_inputs() -> None:
         assert calls, f"{path} must invoke OctoScribe"
 
 
+def test_examples_use_only_the_three_path_contract() -> None:
+    legacy_inputs = ("data_repo_path:", "audio_repo_path:", "transcript_repo_path:")
+    for path in EXAMPLES:
+        example = path.read_text(encoding="utf-8")
+        for legacy_input in legacy_inputs:
+            assert legacy_input not in example
+
+    for name in ("full.yml", "pipeline.yml"):
+        example = (ROOT / "examples" / name).read_text(encoding="utf-8")
+        assert "AUDIO_PATH:" in example
+        assert "TRANSCRIPT_PATH:" in example
+        assert "MANIFEST_PATH:" in example
+        assert "'./audio-data/audio' || './data/audio'" in example
+        assert "'./transcript-data/transcriptions' || './data/transcriptions'" in example
+        assert "'./transcript-data/manifest.json' || './data/manifest.json'" in example
+
+
 def test_full_example_preserves_the_fidelity_checkpoint_order() -> None:
     full = (ROOT / "examples" / "full.yml").read_text(encoding="utf-8")
     ordered_markers = (
@@ -259,9 +276,9 @@ def test_in_repository_example_uses_one_checkout_and_builtin_auth() -> None:
     assert "uses: octoleo/git-user" not in example
     assert "GITHUB_TOKEN" in example
     assert "github-actions[bot]" in example
-    assert example.count("data_repo_path: .") == 2
-    assert "audio_repo_path:" not in example
-    assert "transcript_repo_path:" not in example
+    assert "AUDIO_PATH: ./audio" in example
+    assert "TRANSCRIPT_PATH: ./transcriptions" in example
+    assert "MANIFEST_PATH: ./manifest.json" in example
     for evidence_path in (
         "audio/",
         "manifest.json",
@@ -285,3 +302,14 @@ def test_minimal_example_uses_read_only_checkout_credentials() -> None:
     example = (ROOT / "examples" / "minimal.yml").read_text(encoding="utf-8")
     assert "permissions:\n  contents: read" in example
     assert "persist-credentials: false" in example
+    assert example.count("uses: octoleo/octoscribe@v1") == 1
+    assert "command: transcribe" in example
+    assert "uses: actions/upload-artifact@v4" in example
+    assert "uses: octoleo/git-user" not in example
+    assert "/bin/git" not in example
+    assert "AUDIO_PATH:" not in example
+    assert "TRANSCRIPT_PATH:" not in example
+    assert "MANIFEST_PATH:" not in example
+    assert "audio_path:" not in example
+    assert "transcript_path:" not in example
+    assert "manifest_path:" not in example

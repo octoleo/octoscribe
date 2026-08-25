@@ -67,6 +67,11 @@ jobs:
       PROVIDERS: ${{ inputs.providers || vars.OCTOSCRIBE_ASR_PROVIDERS || '' }}
       PRIMARY_PROVIDER: ${{ inputs.primary_provider || vars.OCTOSCRIBE_PRIMARY_ASR || '' }}
       VERBOSE: ${{ inputs.verbose || vars.OCTOSCRIBE_VERBOSE || 'false' }}
+      # These are the only three storage locations OctoScribe needs. They are
+      # paths in the runner after the caller-owned repositories are checked out.
+      AUDIO_PATH: ${{ (inputs.repository_layout || vars.REPOSITORY_LAYOUT || 'split') == 'split' && './audio-data/audio' || './data/audio' }}
+      TRANSCRIPT_PATH: ${{ (inputs.repository_layout || vars.REPOSITORY_LAYOUT || 'split') == 'split' && './transcript-data/transcriptions' || './data/transcriptions' }}
+      MANIFEST_PATH: ${{ (inputs.repository_layout || vars.REPOSITORY_LAYOUT || 'split') == 'split' && './transcript-data/manifest.json' || './data/manifest.json' }}
 
     steps:
       - name: Validate selected layout and source
@@ -169,9 +174,6 @@ jobs:
           telegram_phone: ${{ secrets.TELEGRAM_PHONE }}
           telegram_session_b64: ${{ secrets.TELEGRAM_SESSION_B64 }}
           telegram_group: ${{ vars.TELEGRAM_GROUP }}
-          audio_repo_path: ${{ env.REPOSITORY_LAYOUT == 'split' && './audio-data' || '' }}
-          transcript_repo_path: ${{ env.REPOSITORY_LAYOUT == 'split' && './transcript-data' || '' }}
-          data_repo_path: ${{ env.REPOSITORY_LAYOUT == 'shared' && './data' || '' }}
           config_path: ${{ vars.OCTOSCRIBE_CONFIG_PATH || '' }}
           verbose: ${{ env.VERBOSE }}
 
@@ -278,9 +280,6 @@ jobs:
           local_model: ${{ vars.LOCAL_MODEL || 'large-v3' }}
           local_device: ${{ vars.LOCAL_DEVICE || 'cpu' }}
           local_compute_type: ${{ vars.LOCAL_COMPUTE_TYPE || 'int8' }}
-          audio_repo_path: ${{ env.REPOSITORY_LAYOUT == 'split' && './audio-data' || '' }}
-          transcript_repo_path: ${{ env.REPOSITORY_LAYOUT == 'split' && './transcript-data' || '' }}
-          data_repo_path: ${{ env.REPOSITORY_LAYOUT == 'shared' && './data' || '' }}
           audio_revision: ${{ steps.audio.outputs.revision }}
           audio_repository_branch: ${{ steps.audio.outputs.branch }}
           config_path: ${{ vars.OCTOSCRIBE_CONFIG_PATH || '' }}

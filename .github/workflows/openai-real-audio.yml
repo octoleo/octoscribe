@@ -2,12 +2,6 @@ name: OpenAI Real Audio
 
 on:
   workflow_dispatch:
-    inputs:
-      capture_reference:
-        description: 'Capture generated transcripts as initial reference artifacts'
-        required: false
-        default: false
-        type: boolean
   pull_request:
     branches: [v1]
     types: [opened, synchronize, reopened, closed]
@@ -53,8 +47,7 @@ jobs:
         uses: ./
         with:
           command: verify
-          reference_required: false
-          capture_reference: ${{ github.event_name == 'workflow_dispatch' && inputs.capture_reference || false }}
+          reference_required: true
 
       - name: Upload generated transcripts and comparison evidence
         if: always()

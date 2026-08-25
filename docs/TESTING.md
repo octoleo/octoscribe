@@ -11,10 +11,13 @@ For the implementation model, see [Architecture](ARCHITECTURE.md).
 ## Setup
 
 ```bash
-python3.11 -m venv .venv
+python3.14 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements-dev.txt
 ```
+
+The supported/tested minor versions are Python 3.11, 3.12, 3.13, and 3.14. The
+composite action uses Python 3.14.
 
 `requirements-dev.txt` includes the core runtime and pytest tooling. It does
 not install the optional Faster-Whisper runtime; local backend tests replace
@@ -22,6 +25,17 @@ that dependency with a test double.
 
 The real chunk materialization test runs when `ffmpeg` and `ffprobe` are on
 `PATH` and skips cleanly otherwise.
+
+All integration tests use the public three-path contract:
+`AUDIO_PATH`/`audio_path` (default `./audio`),
+`TRANSCRIPT_PATH`/`transcript_path` (default `./transcriptions`), and
+`MANIFEST_PATH`/`manifest_path` (default `./manifest.json`). Tests cover relative
+resolution from the workspace/current directory, absolute paths, and paths in
+the same or independently checked-out repositories. Legacy root inputs are
+compatibility cases, not the primary test setup.
+Action-contract tests enforce the precedence `non-empty action input > inherited
+environment variable > effective default`; empty input metadata must not mask a
+caller-provided environment value.
 
 ## Run tests
 
@@ -44,7 +58,7 @@ python -m pytest \
   tests/test_ensemble.py::test_third_provider_runs_only_after_retry_and_loop_stops
 
 # Keyword selection
-python -m pytest -k "hash or needs_review"
+python -m pytest -k "hash or completed_with_warnings"
 ```
 
 Coverage:
@@ -61,7 +75,7 @@ python -m pytest --cov=src --cov-report=html
 | `test_audio_chunks.py` | ffprobe/ffmpeg command construction, silence parsing, deterministic WAV extraction, size limits, cleanup, and tool timeouts. |
 | `test_audio_chunks_ffmpeg_integration.py` | Real generated audio is probed, silence-detected, extracted twice, hashed identically, and verified as mono 16 kHz PCM. |
 | `test_chunking.py` | Gapless silence-aware planning, eight-minute/12-second defaults, hard limits, deterministic ties, exact conservative seams, and randomized invariants. |
-| `test_consensus.py` | Comparison-only normalization, additions/deletions/substitutions, critical negation/number/Scripture detection, and bounded policy decisions. |
+| `test_consensus.py` | Comparison-only normalization, additions/deletions/substitutions, high-fidelity-priority negation/number/Scripture differences, and bounded policy decisions. |
 | `test_ensemble.py` | One/two/three-provider flows, primary ownership, one retry, one arbiter, provider outages, seam downgrade, source hashes, and evidence persistence. |
 | `test_evidence.py` | Schema validation, source/chunk/transcript hashes, deterministic JSON, append-only conflicts, safe filenames, reports, seams, and audio revisions. |
 | `test_provider.py` | Provider transcript and timed-word validation plus detailed-backend adaptation. |
@@ -69,25 +83,26 @@ python -m pytest --cov=src --cov-report=html
 | `test_xai_backend.py` | Pinned endpoint, multipart fidelity options, response parsing, word timestamps, retries, size checks, and secret-safe errors. |
 | `test_meta_backend.py` | Explicit ASR URL resolution, HTTPS/loopback rules, multipart model/language, optional bearer token, response formats, retries, and validation. |
 | `test_transcribe.py` | OpenAI and optional local adapter contracts, transport retries, empty output, backend compatibility, and batch orchestration. |
-| `test_transcriber_ensemble.py` | Batch integration with the ensemble, `needs-review` quarantine, hashes, provider failures, and manifest/report links. |
+| `test_transcriber_ensemble.py` | Batch integration with the ensemble, normally published `completed_with_warnings` results, hashes, provider failures, and manifest/report links. |
 | `test_transcribe_cmd.py` | Caller-supplied audio revision/branch provenance and Git-independent transcription. |
 | `test_transcribe_hardening.py` | Collision-safe output paths and the empty-result failure guard. |
 | `test_retry.py` | Transient/permanent error classification, backoff, exhaustion, and hard retry bounds. |
 | `test_manifest.py` | Source-hash immutability, quality states, pending queries, human verification, stats, atomic JSON, and thread safety. |
-| `test_folder.py` | Recursive/flat scans, supported formats, embedded/technical metadata, content-hash dedup, resume, copy verification, and source preservation. |
+| `test_folder.py` | Recursive/flat `source_folder` scans, verified copies into `AUDIO_PATH`, supported formats, embedded/technical metadata, content-hash dedup, resume, and source preservation. |
 | `test_telegram.py`, `test_telegram_client.py` | Audio selection, the historical OGG manifest contract, metadata, download behaviour, entity resolution, session handling, and Telegram retries with Telethon mocked. |
-| `test_config.py` | Precedence, provider discovery/order, command-aware secrets, split/shared workspace paths, endpoint rules, path resolution, and numeric bounds. |
+| `test_config.py` | Precedence, provider discovery/order, command-aware secrets, the three explicit paths and defaults, endpoint rules, path resolution, and numeric bounds. |
 | `test_source_cmd.py` | CLI overrides and folder/Telegram source dispatch. |
 | `test_ci_export_cmd.py`, `test_session_cmd.py`, `test_debug.py` | CI export guard/redaction, Telegram session commands, and diagnostic behaviour. |
 | `test_persistence.py` | Atomic text writes and periodic manifest saves. |
-| `test_action_contract.py` | Composite-action input mapping, no-Git boundary, shared/split paths, and caller-supplied provenance. |
+| `test_action_contract.py` | `audio_path`/`transcript_path`/`manifest_path` defaults and mapping, workspace-relative and absolute placement, no-Git boundary, compatibility roots, and caller-supplied provenance. |
 
 ## Fidelity properties under test
 
 ### Source identity
 
 Tests prove that a stored audio digest cannot be replaced by a different
-SHA-256 value, that folder copies are verified, that the ensemble rejects an
+SHA-256 value, that folder sources are copied and hash-verified into
+`AUDIO_PATH` without modifying the source, that the ensemble rejects an
 unexpected source hash before provider work, and that evidence writing rechecks
 source and chunk bytes.
 
@@ -95,7 +110,7 @@ When modifying acquisition or workspace-path code, include at least these cases:
 
 - identical bytes resume without duplication;
 - changed bytes under an existing identity fail;
-- a failed or corrupt copy does not remain as accepted audio;
+- a corrupt or unreadable source does not become accepted audio;
 - caller-supplied revision and branch are recorded without running Git.
 
 ### Chunk planning and seams
@@ -114,7 +129,8 @@ similarity `1.0`. Stitching is a deterministic comparison of overlapping ASR
 text, never a generative edit or additional provider call. Tests specifically
 guard against deleting text when there is a substitution, insertion, deletion,
 short common phrase, or unrelated seam. If no seam is accepted, both surfaces
-remain and the overall result becomes `needs_review`.
+remain, normal transcript publication continues, and the overall result becomes
+`completed_with_warnings`.
 
 Include long-duration plans (including 90-minute inputs) to prove that the
 recording is partitioned into bounded requests with the configured overlap and
@@ -141,7 +157,8 @@ depends on provider text.
 
 The canonical result is asserted separately from agreement. Tests prove that a
 third provider or majority cannot silently rewrite the primary, and that an
-unresolved result remains `needs_review`.
+unresolved result remains completed output with the
+`completed_with_warnings` technical-fidelity state.
 
 ### Evidence preservation
 
@@ -163,12 +180,18 @@ of:
 - `machine_transcribed` for a one-provider result;
 - `cross_checked` only after independent normalized-word agreement and proven
   seams;
-- `needs_review` for unresolved disagreement, unavailable independent
-  verification, or an unresolved seam;
-- `human_verified` only after an explicit human-verification operation.
+- `completed_with_warnings` for a completed, normally published transcript
+  with unresolved provider disagreement, unavailable independent verification,
+  or an unresolved seam;
+- `human_verified` only after a person explicitly compared the transcript with
+  the source audio.
 
-Also assert the output location: unresolved text belongs below
-`transcriptions/needs-review/`.
+All completed states use the normal `transcriptions/` output directory.
+Technical warning states must never route religious or any other material to a
+different directory, suppress output, or introduce content moderation.
+Tests also assert that `integrity_warnings` identifies each applicable
+provider disagreement, unaligned seam, or provider failure so the state is
+machine-readable and never opaque.
 
 ## Test-double patterns
 
@@ -196,9 +219,10 @@ generates PCM samples, uses local ffmpeg/ffprobe, and performs no network I/O.
 Telegram tests replace asynchronous client methods with `AsyncMock`. Action and
 CLI contract tests assert that OctoScribe itself never runs Git. Workflow
 templates may be statically checked for the expected caller-owned sequence:
-clone, acquire, audio/index checkpoint, revision capture, transcribe, evidence
-checkpoint, and failure propagation. Temporary Git repositories used to test
-workflow helper behavior must remain inside `tmp_path` and require no remote.
+checkout, supply the three paths, acquire or scan audio, checkpoint the manifest,
+transcribe, and preserve text/evidence with failure propagation. Temporary Git
+repositories used to test workflow helper behavior must remain inside
+`tmp_path` and require no remote.
 
 ## Adding or changing functionality
 
@@ -224,20 +248,47 @@ writes, and rejection of conflicting replacement.
 
 ## CI
 
-`.github/workflows/ci.yml` runs for every pull-request update targeting `v1`,
-and for pushes to that integration branch. It can also be started manually on
-any selected branch through `workflow_dispatch`. CI uses Python 3.11 and 3.12,
-installs `requirements-dev.txt`, runs the full suite with coverage, and uploads
-the Python 3.12 coverage file to Codecov without making Codecov availability a
-test gate.
+`.github/workflows/ci.yml` is the credential-free validation workflow. It runs
+for every pull-request update targeting `v1` and for pushes to that integration
+branch, and it can also be started manually on any selected branch through
+`workflow_dispatch`. CI tests Python 3.11, 3.12, 3.13, and 3.14, installs
+`requirements-dev.txt`, runs the full suite with coverage, and uploads the
+Python 3.14 coverage file to Codecov without making Codecov availability a test
+gate. A separate explicit job runs the complete suite on Ubuntu 26.04 with
+Python 3.14, matching the newest supported deployment target rather than relying
+only on `ubuntu-latest`.
 
-CI is the only active workflow in this source repository. The credentialed
-operational reference lives at `examples/pipeline.yml` for consumers to copy.
+`.github/workflows/openai-real-audio.yml` is the separate paid real-audio
+workflow and a clean consumer example. It checks out the revision under test,
+invokes OctoScribe through `uses: ./`, runs OctoScribe's own reference
+verification through `command: verify`, and uploads the manifest, generated
+transcripts, candidates, evidence reports, comparison reports, and reference
+files as GitHub Actions artifacts. Its workflow file contains no inline Python
+implementation of the verifier.
+
+The real-audio workflow can be triggered manually and after a pull request is
+merged into `v1`. Manual capture mode is the only operation allowed to produce
+bootstrap machine reference files; the capture artifact can then be inspected
+and deliberately committed. Merge-triggered validation requires those
+references to be committed already and never silently replaces them.
+Validation compares each generated transcript with its committed reference
+word-for-word after normalizing only case, punctuation, and whitespace, and
+reports every added, deleted, or substituted spoken word.
+
+The workflow uses `tests/fixtures/telegram/reference-transcripts/` for committed
+references and `tests/fixtures/telegram/comparison-reports/` for machine-readable
+diffs. The direct command supplies `--transcript-path`, `--reference-path`, and
+`--comparison-report-path` before `verify`; only an intentional manual bootstrap
+may add `--allow-missing-references --capture-reference`.
+
+The credentialed operational workflow for consumers remains at
+`examples/pipeline.yml`.
 `examples/in-repository.yml` covers the common case where the workflow checkout
 itself owns preserved audio, the persistent manifest, transcripts, raw
 candidates, and reports; it publishes through the built-in `GITHUB_TOKEN`.
-`examples/minimal.yml`, `examples/full.yml`, and `examples/pipeline.yml` retain
-the caller-managed external shared/split repository patterns.
+`examples/minimal.yml`, `examples/full.yml`, and `examples/pipeline.yml` show
+the same three inputs pointing either into the workflow repository or into
+caller-managed external checkouts.
 The caller workflow owns all Git operations; the OctoScribe action only
 acquires, hashes, transcribes, records evidence, and reports progress to
 standard output.
@@ -246,20 +297,24 @@ The source repository also contains two owner-supplied Telegram OGG/Opus
 fixtures under `tests/fixtures/telegram/`. Ordinary CI verifies their historical
 metadata and SHA-256 identities, probes their complete durations, derives the
 production silence-aware chunk plans, and decodes short materialized windows
-without a network call. A separate `openai-live` job is eligible only when a
-pull request is merged into `v1`; it is skipped for pull-request updates,
-direct pushes, and manual branch runs. With the repository secret
-`OPENAI_API_KEY` present, that job transcribes both complete
-recordings through the composite action and validates transcript/evidence links,
-hashes, and every recorded chunk seam. The published state must match that
-evidence: fully aligned seams require `machine_transcribed`, while any unaligned
-seam requires `needs_review` and quarantine under `transcriptions/needs-review/`.
-The job then invokes the action again and proves that no output changed. This is
-a paid transport and end-to-end regression, not a claim of human verification
-or measured word-error accuracy.
+without a network call. With the repository secret `OPENAI_API_KEY` present,
+the separate real-audio workflow transcribes both complete recordings through
+the composite action and validates transcript/evidence links, hashes, and every
+recorded chunk seam. Fully aligned seams produce `machine_transcribed`; an
+unaligned seam produces the normally published `completed_with_warnings` state.
+Neither state withholds the transcript.
 
-CI validates provider contracts offline. Before promoting a model or provider
-configuration, separately evaluate it on a private, human-verified sermon set
-covering the actual speakers, microphones, accents, biblical names, references,
-and recording conditions. Never commit that private evaluation audio or its
-credentials to this code repository.
+Committed reference transcripts and uploaded run outputs are machine reference
+material: they make API or model drift visible, but are not automatically
+human-verified ground truth. A ground-truth corpus requires a person to listen
+to the complete source audio and verify the corresponding text. Accordingly,
+the real-audio comparison is a paid transport, repeatability, and regression
+test; it must not be represented as measured word-error accuracy unless its
+references have separately acquired that human-verified provenance.
+
+CI validates provider contracts offline. For measured word-error evaluation,
+separately use a human-verified sermon set covering the actual speakers,
+microphones, accents, biblical names, references, and recording conditions.
+That optional accuracy evaluation is about audio/text fidelity only; OctoScribe
+does not perform theological approval or content moderation. Never commit a
+private evaluation corpus or its credentials to this code repository.
