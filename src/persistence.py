@@ -27,9 +27,9 @@ from typing import Protocol
 # ---------------------------------------------------------------------------
 
 #: Default number of processed items between intermediate manifest saves.
-#: A periodic flush bounds how much progress is lost if the process is killed
-#: mid-run, while still avoiding a disk write after every single item.
-DEFAULT_SAVE_INTERVAL: int = 10
+#: Acquisition and transcription are much more expensive than one atomic JSON
+#: write, so every completed item is durable before the next item can finish.
+DEFAULT_SAVE_INTERVAL: int = 1
 
 
 # ---------------------------------------------------------------------------

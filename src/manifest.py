@@ -27,6 +27,9 @@ _TERMINAL_TRANSCRIPTION_STATES = frozenset(
     }
 )
 
+_FAILURE_MARKER_KEYS = ("failed_stage", "failed_error", "failed_at", "error")
+_ACQUISITION_FAILURE_STAGES = frozenset({"download", "import"})
+
 
 class Manifest:
     """
@@ -64,6 +67,12 @@ class Manifest:
     def _now_iso(self) -> str:
         """Return the current UTC time as an ISO-8601 string."""
         return datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    @staticmethod
+    def _clear_failure_markers(entry: dict[str, Any]) -> None:
+        """Remove the top-level marker for a failure that has been recovered."""
+        for key in _FAILURE_MARKER_KEYS:
+            entry.pop(key, None)
 
     # ------------------------------------------------------------------
     # Query methods (read-only, no lock required for individual reads
@@ -118,6 +127,15 @@ class Manifest:
             entry.update(metadata)
             entry["downloaded"] = True
             entry["telegram_msg_id"] = int(key) if key.isdigit() else key
+            # A successful acquisition retry resolves a previous download or
+            # folder-import failure.  Do not hide an unrelated transcription
+            # failure merely because the source was seen again.
+            failed_stage = entry.get("failed_stage")
+            legacy_failure = failed_stage is None and any(
+                marker in entry for marker in _FAILURE_MARKER_KEYS
+            )
+            if failed_stage in _ACQUISITION_FAILURE_STAGES or legacy_failure:
+                self._clear_failure_markers(entry)
             self._data[key] = entry
 
     def record_audio_hash(self, msg_id: str | int, sha256: str) -> None:
@@ -145,8 +163,8 @@ class Manifest:
         """
         Record that an audio file has been transcribed.
 
-        *result* should contain: output_file, model. A completed_at
-        timestamp is added automatically if not already present in result.
+        *result* should contain: output_file, output_path, audio_path, and model.
+        A completed_at timestamp is added automatically if not already present.
         New callers should provide ``quality_state``.  Legacy callers that do
         not provide it retain status='completed' for backwards compatibility.
         """
@@ -162,9 +180,14 @@ class Manifest:
             ):
                 raise ValueError(f"unknown transcription quality state: {quality_state!r}")
             transcription["status"] = quality_state or "completed"
+            for marker in _FAILURE_MARKER_KEYS:
+                transcription.pop(marker, None)
             if "completed_at" not in transcription:
                 transcription["completed_at"] = self._now_iso()
             entry["transcription"] = transcription
+            # A terminal transcription supersedes any stale failure on this
+            # item, including failures recorded by older manifest versions.
+            self._clear_failure_markers(entry)
             self._data[key] = entry
 
     def mark_failed(self, msg_id: str | int, stage: str, error: str) -> None:
@@ -210,12 +233,19 @@ class Manifest:
             ]
 
     def pending_transcription(self) -> list[dict[str, Any]]:
-        """Return entries that have been downloaded but not yet transcribed."""
+        """Return unique downloaded recordings not yet transcribed.
+
+        Telegram content duplicates remain first-class manifest entries so
+        their message IDs are not downloaded again, but only the canonical
+        recording is eligible for a paid transcription call.
+        """
         with self._lock:
             result: list[dict[str, Any]] = []
             for entry in self._data.values():
                 downloaded = bool(entry.get("downloaded")) and bool(entry.get("filename"))
                 if not downloaded:
+                    continue
+                if entry.get("duplicate") is True:
                     continue
                 transcription = entry.get("transcription")
                 transcribed = (

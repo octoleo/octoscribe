@@ -117,10 +117,16 @@ Its Telethon session lives outside both evidence repositories by default.
 copies recognized audio into the same audio directory used by Telegram, hashes
 the source and copied file, and rejects a mismatched copy. Its manifest key is
 content-derived, so identical bytes are deduplicated independently of filename
-or directory.
+or directory. It also reads safe textual embedded tags and technical container
+properties through mutagen (including title/artist, album, date, duration,
+codec, bitrate, sample rate, and channels) without treating metadata failure as
+an acquisition failure. Binary tags such as cover art are not copied into JSON.
 
 After acquisition, both sources are indistinguishable to the transcription
 pipeline: each manifest entry points to an audio filename and SHA-256 digest.
+On success, the transcription object adds repository-relative `audio_path` and
+`output_path` values while retaining the legacy `output_file`, so the manifest
+is the direct audio-to-text index for shared and split layouts.
 
 ## Audio integrity and caller-owned publication
 
@@ -339,6 +345,14 @@ primary provider, audio and transcript hashes, duration, discrepancy count,
 provider failures, quality state, and source revision when available. Error
 strings are whitespace-normalized, bounded, and scrubbed of configured API
 keys before persistence.
+
+Before selecting work, `Transcriber` reconciles terminal manifest entries with
+the filesystem. An entry is skipped only when `output_file` is a safe relative
+path to a regular file inside the configured transcription directory and the
+file still matches `transcript_sha256` when that digest is present. Missing,
+escaped, symlinked, or hash-mismatched outputs are re-queued. This makes the
+manifest an idempotence checkpoint without allowing stale state to conceal lost
+or modified text.
 
 ## Quality states and output locations
 

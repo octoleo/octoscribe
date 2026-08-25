@@ -6,6 +6,10 @@ on:
     branches: [v1]
   pull_request:
     branches: [v1]
+    types: [opened, synchronize, reopened, closed]
+
+permissions:
+  contents: read
 
 jobs:
   test:
@@ -216,3 +220,93 @@ jobs:
           if [ -f "$BASE/server.pid" ]; then
             kill "$(cat "$BASE/server.pid")" 2>/dev/null || true
           fi
+
+  openai-live:
+    name: OpenAI integration (v1 post-merge)
+    if: ${{ github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'v1' }}
+    needs: [test, action-smoke]
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+
+      - name: Validate the paid-test secret and prepare Telegram evidence
+        shell: bash
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${OPENAI_API_KEY:-}" ]; then
+            echo '::error::OPENAI_API_KEY must be configured as a repository secret for the v1 post-merge test.'
+            exit 1
+          fi
+          python3 tests/openai_live_verifier.py prepare \
+            --fixture-root tests/fixtures/telegram \
+            --workspace "$RUNNER_TEMP/octoscribe-openai-live/data"
+
+      - name: Transcribe both real Telegram OGG fixtures with OpenAI
+        id: openai_transcribe
+        uses: ./
+        with:
+          command: transcribe
+          providers: openai
+          primary_provider: openai
+          openai_api_key: ${{ secrets.OPENAI_API_KEY }}
+          transcribe_model: gpt-transcribe
+          transcribe_language: en
+          data_repo_path: ${{ runner.temp }}/octoscribe-openai-live/data
+          audio_revision: ${{ github.event.pull_request.merge_commit_sha }}
+          audio_repository_branch: ${{ github.event.pull_request.base.ref }}
+          verbose: true
+
+      - name: Require machine-transcribed outputs and aligned seams
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tests/openai_live_verifier.py verify \
+            --workspace "$RUNNER_TEMP/octoscribe-openai-live/data" \
+            --revision "${{ github.event.pull_request.merge_commit_sha }}" \
+            --branch "${{ github.event.pull_request.base.ref }}" \
+            --audio-dir "${{ steps.openai_transcribe.outputs.audio_dir }}" \
+            --manifest-file "${{ steps.openai_transcribe.outputs.manifest_file }}" \
+            --transcriptions-dir "${{ steps.openai_transcribe.outputs.transcriptions_dir }}" \
+            --candidates-dir "${{ steps.openai_transcribe.outputs.candidates_dir }}" \
+            --reports-dir "${{ steps.openai_transcribe.outputs.reports_dir }}" \
+            --snapshot "$RUNNER_TEMP/octoscribe-openai-live/first-pass.snapshot.json"
+
+      - name: Re-run with cloud access disabled (completed work must be skipped)
+        id: idempotent_rerun
+        uses: ./
+        env:
+          # A regression that calls OpenAI on this pass fails locally instead
+          # of spending money or silently replacing existing evidence.
+          OPENAI_BASE_URL: http://127.0.0.1:9/v1
+        with:
+          command: transcribe
+          providers: openai
+          primary_provider: openai
+          openai_api_key: second-pass-must-not-call-openai
+          transcribe_model: gpt-transcribe
+          transcribe_language: en
+          data_repo_path: ${{ runner.temp }}/octoscribe-openai-live/data
+          audio_revision: ${{ github.event.pull_request.merge_commit_sha }}
+          audio_repository_branch: ${{ github.event.pull_request.base.ref }}
+          verbose: true
+
+      - name: Prove the rerun preserved every persistent byte
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 tests/openai_live_verifier.py assert-idempotent \
+            --workspace "$RUNNER_TEMP/octoscribe-openai-live/data" \
+            --revision "${{ github.event.pull_request.merge_commit_sha }}" \
+            --branch "${{ github.event.pull_request.base.ref }}" \
+            --audio-dir "${{ steps.idempotent_rerun.outputs.audio_dir }}" \
+            --manifest-file "${{ steps.idempotent_rerun.outputs.manifest_file }}" \
+            --transcriptions-dir "${{ steps.idempotent_rerun.outputs.transcriptions_dir }}" \
+            --candidates-dir "${{ steps.idempotent_rerun.outputs.candidates_dir }}" \
+            --reports-dir "${{ steps.idempotent_rerun.outputs.reports_dir }}" \
+            --snapshot "$RUNNER_TEMP/octoscribe-openai-live/first-pass.snapshot.json"

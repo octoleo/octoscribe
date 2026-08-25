@@ -76,6 +76,8 @@ def test_transcriber_records_truthful_ensemble_state_and_provenance(tmp_path: Pa
         "42",
         {
             "output_file": "needs-review/sermon.txt",
+            "output_path": "transcriptions/needs-review/sermon.txt",
+            "audio_path": "audio/sermon.mp3",
             "model": "openai-model",
             "transcript_sha256": hashlib.sha256(b"Do not fear.").hexdigest(),
             "quality_state": "needs_review",

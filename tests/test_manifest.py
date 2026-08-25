@@ -33,6 +33,8 @@ def _sample_metadata(msg_id: int | str = 1) -> dict:
 def _sample_transcription_result() -> dict:
     return {
         "output_file": "Sermon_1.txt",
+        "output_path": "transcriptions/Sermon_1.txt",
+        "audio_path": "audio/Sermon_1.mp3",
         "model": "gpt-4o-transcribe",
         "completed_at": "2024-01-15T10:30:00Z",
     }
@@ -112,6 +114,8 @@ def test_mark_transcribed_updates_entry(tmp_path: Path) -> None:
     transcription = entry["transcription"]
     assert transcription["status"] == "completed"
     assert transcription["output_file"] == "Sermon_1.txt"
+    assert transcription["output_path"] == "transcriptions/Sermon_1.txt"
+    assert transcription["audio_path"] == "audio/Sermon_1.mp3"
     assert transcription["model"] == "gpt-4o-transcribe"
     # The original download data must still be intact.
     assert entry["filename"] == "Sermon_1.mp3"
@@ -318,6 +322,82 @@ def test_mark_failed_download_stage(tmp_path: Path) -> None:
     assert entry is not None
     assert entry["failed_stage"] == "download"
     assert entry["failed_error"] == "network error"
+
+
+@pytest.mark.parametrize("stage", ["download", "import"])
+def test_mark_downloaded_clears_recovered_acquisition_failure(
+    tmp_path: Path, stage: str
+) -> None:
+    m = Manifest(tmp_path / "manifest.json")
+    m.mark_failed(2, stage, "temporary source failure")
+
+    m.mark_downloaded(2, _sample_metadata(2))
+
+    entry = m.get_entry(2)
+    assert entry is not None
+    assert entry["downloaded"] is True
+    assert "failed_stage" not in entry
+    assert "failed_error" not in entry
+    assert "failed_at" not in entry
+    assert m.stats()["failed"] == 0
+
+
+def test_mark_downloaded_clears_legacy_acquisition_error(tmp_path: Path) -> None:
+    path = tmp_path / "manifest.json"
+    path.write_text(
+        json.dumps(
+            {
+                "2": {
+                    "telegram_msg_id": 2,
+                    "error": "legacy download error",
+                    "failed_error": "legacy download error",
+                    "failed_at": "2024-01-01T00:00:00Z",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    m = Manifest(path)
+
+    m.mark_downloaded(2, _sample_metadata(2))
+
+    entry = m.get_entry(2)
+    assert entry is not None
+    assert "error" not in entry
+    assert "failed_error" not in entry
+    assert "failed_at" not in entry
+
+
+def test_mark_downloaded_preserves_unresolved_transcription_failure(
+    tmp_path: Path,
+) -> None:
+    m = Manifest(tmp_path / "manifest.json")
+    m.mark_downloaded(2, _sample_metadata(2))
+    m.mark_failed(2, "transcription", "provider unavailable")
+
+    m.mark_downloaded(2, _sample_metadata(2))
+
+    entry = m.get_entry(2)
+    assert entry is not None
+    assert entry["failed_stage"] == "transcription"
+    assert entry["transcription"]["status"] == "failed"
+
+
+def test_mark_transcribed_clears_stale_failure_markers(tmp_path: Path) -> None:
+    m = Manifest(tmp_path / "manifest.json")
+    m.mark_downloaded(2, _sample_metadata(2))
+    m.mark_failed(2, "transcription", "temporary provider failure")
+
+    m.mark_transcribed(2, _sample_transcription_result())
+
+    entry = m.get_entry(2)
+    assert entry is not None
+    assert entry["transcription"]["status"] == "completed"
+    assert "error" not in entry["transcription"]
+    assert "failed_stage" not in entry
+    assert "failed_error" not in entry
+    assert "failed_at" not in entry
+    assert m.stats()["failed"] == 0
 
 
 # ---------------------------------------------------------------------------

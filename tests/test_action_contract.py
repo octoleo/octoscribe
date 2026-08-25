@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
+import runpy
 from pathlib import Path
 
+import pytest
 import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
 ACTION = (ROOT / "action.yml").read_text(encoding="utf-8")
 CI = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+LIVE_VERIFIER = ROOT / "tests" / "openai_live_verifier.py"
 PIPELINE = (ROOT / "examples" / "pipeline.yml").read_text(
     encoding="utf-8"
 )
@@ -115,7 +119,7 @@ def test_action_exposes_resolved_artifact_paths() -> None:
 
 def test_ci_executes_the_real_action_offline_in_both_layouts() -> None:
     assert "layout: [split, shared]" in CI
-    assert CI.count("uses: ./") == 2
+    assert CI.count("uses: ./") == 4
     assert "tests/action_smoke_server.py" in CI
     assert "command: download" in CI
     assert "command: transcribe" in CI
@@ -127,12 +131,116 @@ def test_ci_executes_the_real_action_offline_in_both_layouts() -> None:
     assert 'report["final_transcript_sha256"]' in CI
 
 
+def test_paid_openai_test_runs_only_after_a_pr_merge_to_v1() -> None:
+    assert "types: [opened, synchronize, reopened, closed]" in CI
+    live_job = CI.split("\n  openai-live:\n", 1)[1]
+    assert "github.event_name == 'pull_request'" in live_job
+    assert "github.event.action == 'closed'" in live_job
+    assert "github.event.pull_request.merged == true" in live_job
+    assert "github.event.pull_request.base.ref == 'v1'" in live_job
+    assert "github.event_name == 'push'" not in live_job
+    assert "needs: [test, action-smoke]" in live_job
+    assert "secrets.OPENAI_API_KEY" in live_job
+    assert "OPENAI_API_KEY must be configured as a repository secret" in live_job
+    assert live_job.count("uses: ./") == 2
+    assert "tests/openai_live_verifier.py prepare" in live_job
+    assert "tests/openai_live_verifier.py verify" in live_job
+    assert "tests/openai_live_verifier.py assert-idempotent" in live_job
+    assert "tests/fixtures/telegram" in live_job
+    assert "providers: openai" in live_job
+    assert "primary_provider: openai" in live_job
+    assert "transcribe_model: gpt-transcribe" in live_job
+    assert "ref: ${{ github.event.pull_request.merge_commit_sha }}" in live_job
+    assert "audio_revision: ${{ github.event.pull_request.merge_commit_sha }}" in live_job
+    assert "audio_repository_branch: ${{ github.event.pull_request.base.ref }}" in live_job
+    assert "Require machine-transcribed outputs and aligned seams" in live_job
+
+
+def test_paid_openai_verifier_rejects_review_state_and_unaligned_seams() -> None:
+    verifier = runpy.run_path(str(LIVE_VERIFIER))
+
+    verifier["_require_release_quality_state"]("856", "machine_transcribed")
+    with pytest.raises(AssertionError, match="must finish 'machine_transcribed'"):
+        verifier["_require_release_quality_state"]("856", "needs_review")
+
+    raw = "the exact overlap words are retained here"
+    transcript_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    expected = {
+        "filename": "clear-fixture.ogg",
+        "hash": "a" * 64,
+        "container_duration_ms": 100_000,
+        "expected_chunks": 2,
+    }
+    chunks = []
+    for index, (start, end) in enumerate(((0.0, 60.0), (48.0, 100.0))):
+        chunks.append(
+            {
+                "index": index,
+                "start_seconds": start,
+                "end_seconds": end,
+                "sha256": str(index) * 64,
+                "attempts": [
+                    {
+                        "provider": "openai",
+                        "model": "gpt-transcribe",
+                        "attempt": 1,
+                        "raw_transcript": raw,
+                        "transcript_sha256": transcript_hash,
+                    }
+                ],
+                "canonical": {"provider": "openai", "attempt": 1},
+            }
+        )
+    report = {
+        "chunks": chunks,
+        "seams": [{"left_chunk": 0, "right_chunk": 1, "aligned": True}],
+    }
+    verifier["_validate_report_chunks"](report, expected)
+
+    report["seams"][0]["aligned"] = False
+    with pytest.raises(AssertionError, match="every overlap to align"):
+        verifier["_validate_report_chunks"](report, expected)
+
+
+def test_paid_openai_idempotence_pass_cannot_reach_the_cloud() -> None:
+    live_job = CI.split("\n  openai-live:\n", 1)[1]
+    rerun = live_job.split(
+        "Re-run with cloud access disabled (completed work must be skipped)", 1
+    )[1]
+    assert "OPENAI_BASE_URL: http://127.0.0.1:9/v1" in rerun
+    assert "openai_api_key: second-pass-must-not-call-openai" in rerun
+    assert "Prove the rerun preserved every persistent byte" in rerun
+
+
+def test_live_verifier_prepares_exact_owner_supplied_fixture(tmp_path: Path) -> None:
+    verifier = runpy.run_path(str(LIVE_VERIFIER))
+    fixture = ROOT / "tests" / "fixtures" / "telegram"
+    workspace = tmp_path / "data"
+    verifier["prepare_workspace"](fixture, workspace)
+
+    source_snapshot = verifier["content_snapshot"](fixture)
+    prepared_snapshot = verifier["content_snapshot"](workspace)
+    assert prepared_snapshot == {
+        path: details
+        for path, details in source_snapshot.items()
+        if path == "manifest.json" or path.startswith("audio/")
+    }
+
+    snapshot_path = tmp_path / "snapshot.json"
+    verifier["write_snapshot"](workspace, snapshot_path)
+    verifier["assert_idempotent"](workspace, snapshot_path)
+    (workspace / "manifest.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(AssertionError, match="idempotent rerun changed"):
+        verifier["assert_idempotent"](workspace, snapshot_path)
+
+
 def test_ci_is_the_only_active_workflow_and_has_complete_triggers() -> None:
     active = tuple(sorted((ROOT / ".github" / "workflows").glob("*.yml")))
     assert [path.name for path in active] == ["ci.yml"]
     assert "workflow_dispatch:" in CI
     assert "pull_request:" in CI
     assert CI.count("branches: [v1]") == 2
+    assert "permissions:\n  contents: read" in CI
     assert "branches: [main" not in CI
     assert "feature/**" not in CI
 
@@ -233,3 +341,9 @@ def test_in_repository_example_uses_one_checkout_and_builtin_auth() -> None:
     )
     offsets = [example.index(marker) for marker in ordered_markers]
     assert offsets == sorted(offsets)
+
+
+def test_minimal_example_uses_read_only_checkout_credentials() -> None:
+    example = (ROOT / "examples" / "minimal.yml").read_text(encoding="utf-8")
+    assert "permissions:\n  contents: read" in example
+    assert "persist-credentials: false" in example

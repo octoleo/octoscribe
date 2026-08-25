@@ -152,8 +152,25 @@ The caller must preserve the text/evidence worktree between runs by committing
 its output. Its `manifest.json` is the index that records source identity,
 SHA-256 hashes, acquisition state, transcript state, providers, output hashes,
 and quality results. On the next checkout, OctoScribe reads that index and
-skips content already completed. Folder imports use content hashes, so renaming
-the same source file does not make it new work.
+skips content already completed. A terminal manifest state is skipped only when
+its recorded transcript is still a safe regular file and its SHA-256 still
+matches the manifest. A missing or changed output is re-queued, while an intact
+output never incurs another provider call. Folder imports use content hashes,
+so renaming the same source file does not make it new work.
+
+Telegram entries retain the established message/audio fields: message ID,
+date, title, performer, duration, formatted duration, extension, sanitized and
+original filenames, and the exact source SHA-256. Folder entries record the
+same common fields where available and use mutagen to collect safe embedded
+tags plus technical properties such as album, artist, composer, genre, track,
+bitrate, sample rate, channels, codec, MIME type, file size, and source modified
+time. Missing metadata remains `null`; it never blocks import or alters audio.
+
+After transcription, each entry's `transcription` object retains the legacy
+`output_file` and also records repository-relative `audio_path` and
+`output_path`, the transcript SHA-256, provider/model provenance, quality state,
+and evidence-report link. The manifest can therefore be used directly as the
+catalog joining every preserved recording to its published text and evidence.
 
 Recommended split layout:
 

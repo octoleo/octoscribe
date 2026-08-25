@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import shutil
 import struct
+import subprocess
 import wave
 from pathlib import Path
 
@@ -88,3 +89,55 @@ def test_real_ffmpeg_probe_silence_and_materialization_are_deterministic(
         assert extracted.getnframes() == pytest.approx(32_000, abs=16)
 
     assert tools.probe_duration_ms(first.path) == pytest.approx(2_000, abs=2)
+
+
+def test_real_ffmpeg_accepts_telegram_ogg_opus_without_changing_source(
+    tmp_path: Path,
+) -> None:
+    """A Telegram-style OGG/Opus source can be probed and chunked verbatim."""
+    _require_audio_tools()
+    wav_source = tmp_path / "source.wav"
+    ogg_source = tmp_path / "record.ogg"
+    _write_test_wav(wav_source)
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostdin",
+            "-y",
+            "-i",
+            str(wav_source),
+            "-c:a",
+            "libopus",
+            "-b:a",
+            "32k",
+            str(ogg_source),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+    original_hash = sha256_file(ogg_source)
+    tools = FFmpegAudioTools()
+    duration_ms = tools.probe_duration_ms(ogg_source)
+    assert duration_ms == pytest.approx(3_000, abs=25)
+
+    metadata = ChunkMetadata(
+        index=0,
+        core_start_ms=0,
+        core_end_ms=duration_ms,
+        context_start_ms=0,
+        context_end_ms=duration_ms,
+    )
+    [chunk] = tools.materialize(ogg_source, [metadata], tmp_path / "chunks")
+
+    assert sha256_file(ogg_source) == original_hash
+    assert chunk.path.suffix == ".wav"
+    assert chunk.sha256 == sha256_file(chunk.path)
+    with wave.open(str(chunk.path), "rb") as extracted:
+        assert extracted.getnchannels() == 1
+        assert extracted.getsampwidth() == 2
+        assert extracted.getframerate() == 16_000

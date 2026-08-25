@@ -8,6 +8,9 @@ name: Transcribe sermon audio (minimal)
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 concurrency:
   group: octoscribe-minimal-${{ github.repository }}
   cancel-in-progress: false
@@ -20,6 +23,8 @@ jobs:
       # The calling repository supplies ./incoming-audio in this example.
       - name: Check out prepared audio
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Configure caller Git identity and SSH
         uses: octoleo/git-user@v2

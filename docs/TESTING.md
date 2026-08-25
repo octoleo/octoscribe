@@ -74,8 +74,8 @@ python -m pytest --cov=src --cov-report=html
 | `test_transcribe_hardening.py` | Collision-safe output paths and the empty-result failure guard. |
 | `test_retry.py` | Transient/permanent error classification, backoff, exhaustion, and hard retry bounds. |
 | `test_manifest.py` | Source-hash immutability, quality states, pending queries, human verification, stats, atomic JSON, and thread safety. |
-| `test_folder.py` | Recursive/flat scans, supported formats, content-hash dedup, resume, copy verification, and source preservation. |
-| `test_telegram.py`, `test_telegram_client.py` | Audio selection, metadata, download behaviour, entity resolution, session handling, and Telegram retries with Telethon mocked. |
+| `test_folder.py` | Recursive/flat scans, supported formats, embedded/technical metadata, content-hash dedup, resume, copy verification, and source preservation. |
+| `test_telegram.py`, `test_telegram_client.py` | Audio selection, the historical OGG manifest contract, metadata, download behaviour, entity resolution, session handling, and Telegram retries with Telethon mocked. |
 | `test_config.py` | Precedence, provider discovery/order, command-aware secrets, split/shared workspace paths, endpoint rules, path resolution, and numeric bounds. |
 | `test_source_cmd.py` | CLI overrides and folder/Telegram source dispatch. |
 | `test_ci_export_cmd.py`, `test_session_cmd.py`, `test_debug.py` | CI export guard/redaction, Telegram session commands, and diagnostic behaviour. |
@@ -241,6 +241,21 @@ the caller-managed external shared/split repository patterns.
 The caller workflow owns all Git operations; the OctoScribe action only
 acquires, hashes, transcribes, records evidence, and reports progress to
 standard output.
+
+The source repository also contains two owner-supplied Telegram OGG/Opus
+fixtures under `tests/fixtures/telegram/`. Ordinary CI verifies their historical
+metadata and SHA-256 identities, probes their complete durations, derives the
+production silence-aware chunk plans, and decodes short materialized windows
+without a network call. A separate `openai-live` job is eligible only when a
+pull request is merged into `v1`; it is skipped for pull-request updates,
+direct pushes, and manual branch runs. With the repository secret
+`OPENAI_API_KEY` present, that job transcribes both complete
+recordings through the composite action, validates transcript/evidence links and
+hashes, requires both known-clear fixtures to finish `machine_transcribed`, and
+requires every recorded chunk seam to be aligned. A `needs_review` state or an
+unaligned seam fails this release regression. The job then invokes the action
+again and proves that no output changed. This is a paid transport and end-to-end
+regression, not a claim of human verification or measured word-error accuracy.
 
 CI validates provider contracts offline. Before promoting a model or provider
 configuration, separately evaluate it on a private, human-verified sermon set

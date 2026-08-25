@@ -9,11 +9,18 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
 from src.config import Config, SourceConfig
-from src.folder import FolderImporter, ImportStats, _probe_duration
+from src.folder import (
+    FolderImporter,
+    ImportStats,
+    _probe_audio_metadata,
+    _probe_duration,
+)
 from src.manifest import Manifest
 
 
@@ -101,6 +108,44 @@ class TestFolderImporterRun:
             assert entry["hash"]
             assert entry["filename"] in {"Sermon One.mp3", "Deep Truth.flac"}
             assert "source_path" in entry
+            assert entry["size_bytes"] > 0
+            assert "source_modified_at" in entry
+
+    def test_records_embedded_audio_metadata_when_available(
+        self, folder_config: Config, tmp_manifest: Manifest, sample_audio_folder: Path
+    ) -> None:
+        source = sample_audio_folder / "Sermon One.mp3"
+        metadata = {
+            "title": "Matthew 24:39-42",
+            "performer": "Family Devotions",
+            "album": "Daily Sermons",
+            "date": "2025",
+            "duration": 1824,
+            "bitrate_bps": 64_000,
+            "sample_rate_hz": 48_000,
+            "channels": 1,
+            "codec": "MPEGInfo",
+            "embedded_tags": {
+                "title": "Matthew 24:39-42",
+                "artist": "Family Devotions",
+            },
+        }
+        with patch("src.folder._probe_audio_metadata", return_value=metadata):
+            assert FolderImporter(folder_config, tmp_manifest)._import_one(source) == "imported"
+
+        key = hashlib.sha256(b"sermon one audio bytes").hexdigest()
+        entry = tmp_manifest.get_entry(key)
+        assert entry is not None
+        assert entry["title"] == "Matthew 24:39-42"
+        assert entry["performer"] == "Family Devotions"
+        assert entry["album"] == "Daily Sermons"
+        assert entry["date"] == "2025"
+        assert entry["duration"] == 1824
+        assert entry["duration_formatted"] == "30:24"
+        assert entry["bitrate_bps"] == 64_000
+        assert entry["sample_rate_hz"] == 48_000
+        assert entry["channels"] == 1
+        assert entry["embedded_tags"]["artist"] == "Family Devotions"
 
     def test_manifest_key_is_content_hash(
         self, folder_config: Config, tmp_manifest: Manifest
@@ -155,6 +200,45 @@ class TestDedupAndResume:
         stats = FolderImporter(folder_config, tmp_manifest).run()
         assert stats.imported == 0
         assert stats.skipped == 2
+
+    def test_resume_repairs_a_changed_copy_and_clears_repair_failure(
+        self, folder_config: Config, tmp_manifest: Manifest, sample_audio_folder: Path
+    ) -> None:
+        FolderImporter(folder_config, tmp_manifest).run()
+        source = sample_audio_folder / "Sermon One.mp3"
+        expected_hash = hashlib.sha256(source.read_bytes()).hexdigest()
+        entry = tmp_manifest.get_entry(expected_hash)
+        assert entry is not None
+        stored = folder_config.download.audio_dir / entry["filename"]
+        stored.write_bytes(b"CORRUPTED STORED COPY")
+
+        # A temporary repair failure is explicit and durable; the corrupted
+        # bytes are never treated as a completed resume.
+        with patch("src.folder.shutil.copy2", side_effect=OSError("disk full")):
+            failed = FolderImporter(folder_config, tmp_manifest).run()
+        assert failed.failed == 1
+        assert failed.skipped == 1
+        failed_entry = Manifest(folder_config.download.manifest_file).get_entry(
+            expected_hash
+        )
+        assert failed_entry is not None
+        assert failed_entry["failed_stage"] == "import"
+
+        # The next run repairs from the still-trusted source, verifies SHA-256,
+        # preserves the recorded filename, and clears the stale failure state.
+        recovered = FolderImporter(folder_config, tmp_manifest).run()
+        assert recovered.imported == 1
+        assert recovered.skipped == 1
+        assert hashlib.sha256(stored.read_bytes()).hexdigest() == expected_hash
+        recovered_entry = Manifest(folder_config.download.manifest_file).get_entry(
+            expected_hash
+        )
+        assert recovered_entry is not None
+        assert recovered_entry["filename"] == stored.name
+        assert recovered_entry["hash"] == expected_hash
+        assert "failed_stage" not in recovered_entry
+        assert "failed_error" not in recovered_entry
+        assert "failed_at" not in recovered_entry
 
     def test_resume_false_reimports(
         self, folder_config: Config, tmp_manifest: Manifest
@@ -275,3 +359,43 @@ class TestProbeDuration:
         f.write_bytes(b"this is not real audio")
         # Best-effort: must never raise, returns None on unreadable formats.
         assert _probe_duration(f) is None
+
+
+class TestProbeAudioMetadata:
+    def test_extracts_safe_tags_and_technical_audio_properties(
+        self, tmp_path: Path
+    ) -> None:
+        class OggOpusInfo:
+            length = 2570.2
+            bitrate = 48_000
+            sample_rate = 48_000
+            channels = 1
+            bits_per_sample = 16
+
+        fake_audio = SimpleNamespace(
+            tags={
+                "title": ["John 16:14"],
+                "artist": ["Family Devotions"],
+                "album": ["Morning Messages"],
+                "genre": ["Sermon", "Devotional"],
+                "tracknumber": ["1001"],
+            },
+            info=OggOpusInfo(),
+            mime=["audio/ogg", "audio/opus"],
+        )
+        with patch("mutagen.File", return_value=fake_audio):
+            metadata = _probe_audio_metadata(tmp_path / "John 1614.ogg")
+
+        assert metadata["title"] == "John 16:14"
+        assert metadata["performer"] == "Family Devotions"
+        assert metadata["album"] == "Morning Messages"
+        assert metadata["genre"] == "Sermon"
+        assert metadata["track_number"] == "1001"
+        assert metadata["duration"] == 2570
+        assert metadata["bitrate_bps"] == 48_000
+        assert metadata["sample_rate_hz"] == 48_000
+        assert metadata["channels"] == 1
+        assert metadata["bits_per_sample"] == 16
+        assert metadata["codec"] == "OggOpusInfo"
+        assert metadata["mime_types"] == ["audio/ogg", "audio/opus"]
+        assert metadata["embedded_tags"]["genre"] == ["Sermon", "Devotional"]

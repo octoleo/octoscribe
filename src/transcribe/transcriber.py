@@ -44,8 +44,10 @@ from src.transcribe.results import BatchStats, TranscriptionResult
 
 log = logging.getLogger(__name__)
 
-# How many files are processed between periodic manifest saves.
-_SAVE_INTERVAL: int = 5
+# Persist every paid transcription outcome before starting the next item.  A
+# final save still runs at the end, but interval=1 prevents a crash late in a
+# long batch from losing several completed (or failed) API calls.
+_SAVE_INTERVAL: int = 1
 
 
 class Transcriber:
@@ -125,7 +127,8 @@ class Transcriber:
     def run(self) -> BatchStats:
         """Transcribe all pending files.  Returns batch statistics."""
         stats = BatchStats()
-        pending = self._manifest.pending_transcription()
+        out_dir = self._config.transcribe.transcriptions_dir
+        pending = self._reconcile_pending_transcriptions(out_dir)
 
         if not pending:
             log.info("No files pending transcription.")
@@ -133,7 +136,6 @@ class Transcriber:
 
         tcfg = self._config.transcribe
         audio_dir = self._config.download.audio_dir
-        out_dir = tcfg.transcriptions_dir
         out_dir.mkdir(parents=True, exist_ok=True)
 
         provider_display = (
@@ -162,6 +164,89 @@ class Transcriber:
         self._manifest.save()
         log.info("%s", stats.summary())
         return stats
+
+    def _reconcile_pending_transcriptions(self, out_dir: Path) -> list[dict]:
+        """Return unfinished entries plus terminal entries whose text is absent.
+
+        A manifest status alone is not enough to skip paid work forever.  The
+        recorded output must still be a safe regular file and, when a
+        transcript hash is present, its bytes must still match that digest.
+        """
+        pending: list[dict] = []
+        for entry in self._manifest.pending_transcription():
+            if entry.get("duplicate") is True:
+                log.info(
+                    "Skipping duplicate transcription: msg_id=%s canonical_msg_id=%s",
+                    entry.get("telegram_msg_id") or entry.get("msg_id", ""),
+                    entry.get("duplicate_of"),
+                )
+                continue
+            pending.append(entry)
+        pending_ids = {
+            str(entry.get("telegram_msg_id") or entry.get("msg_id", ""))
+            for entry in pending
+        }
+        for entry in self._manifest.all_entries().values():
+            if not (entry.get("downloaded") and entry.get("filename")):
+                continue
+            msg_id = str(entry.get("telegram_msg_id") or entry.get("msg_id", ""))
+            if entry.get("duplicate") is True:
+                log.info(
+                    "Skipping duplicate transcription: msg_id=%s canonical_msg_id=%s",
+                    msg_id,
+                    entry.get("duplicate_of"),
+                )
+                continue
+            if msg_id in pending_ids:
+                continue
+            intact, reason = self._transcript_output_is_intact(entry, out_dir)
+            if intact:
+                transcription = entry.get("transcription") or {}
+                log.info(
+                    "Skipping completed transcription: msg_id=%s output=%s status=%s",
+                    msg_id,
+                    transcription.get("output_file"),
+                    transcription.get("status"),
+                )
+                continue
+            log.warning(
+                "Re-queueing transcription: msg_id=%s reason=%s",
+                msg_id,
+                reason,
+            )
+            pending.append(dict(entry))
+            pending_ids.add(msg_id)
+        return pending
+
+    @staticmethod
+    def _transcript_output_is_intact(
+        entry: dict, out_dir: Path
+    ) -> tuple[bool, str]:
+        transcription = entry.get("transcription")
+        if not isinstance(transcription, dict):
+            return False, "manifest has no transcription result"
+        output_file = transcription.get("output_file")
+        if not isinstance(output_file, str) or not output_file:
+            return False, "manifest has no output_file"
+        relative = Path(output_file)
+        if (
+            relative.is_absolute()
+            or ".." in relative.parts
+            or "\\" in output_file
+        ):
+            return False, "manifest output_file is not a safe relative path"
+        candidate = out_dir / relative
+        if candidate.is_symlink() or not candidate.is_file():
+            return False, "recorded transcript file is missing"
+        try:
+            candidate.resolve(strict=True).relative_to(out_dir.resolve())
+        except (OSError, ValueError):
+            return False, "recorded transcript escapes the output directory"
+        recorded_hash = transcription.get("transcript_sha256")
+        if isinstance(recorded_hash, str) and len(recorded_hash) == 64:
+            if hashlib.sha256(candidate.read_bytes()).hexdigest() != recorded_hash:
+                return False, "recorded transcript SHA-256 does not match"
+        return True, ""
 
     # ------------------------------------------------------------------
     # Execution modes
@@ -356,10 +441,22 @@ class Transcriber:
             target_dir.mkdir(parents=True, exist_ok=True)
             output_path = unique_filepath(target_dir, desired_name, msg_id)
             output_filename = str(output_path.relative_to(out_dir))
+            text_repo = getattr(self._config, "text_repo", None)
+            text_repo_root = Path(
+                getattr(text_repo, "path", out_dir.parent)
+            ).resolve()
+            try:
+                logical_output_path = output_path.resolve().relative_to(text_repo_root)
+            except ValueError as exc:
+                raise RuntimeError(
+                    "configured transcription directory escapes the text evidence repository"
+                ) from exc
             atomic_write_text(output_path, text)
 
             manifest_result: dict[str, object] = {
                 "output_file": output_filename,
+                "output_path": logical_output_path.as_posix(),
+                "audio_path": logical_audio_path.as_posix(),
                 "model": result_model,
                 "transcript_sha256": hashlib.sha256(
                     text.encode("utf-8")
