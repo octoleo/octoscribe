@@ -7,6 +7,7 @@ Usage:
     octoscribe.py download         Acquire new audio from the configured source
                                    (Telegram group or local folder)
     octoscribe.py transcribe       Transcribe unprocessed audio only
+    octoscribe.py verify           Compare transcripts to reference text
     octoscribe.py status           Show pipeline status
     octoscribe.py debug            Inspect Telegram connection and audio metadata
 
@@ -25,6 +26,7 @@ import logging
 import os
 import sys
 from datetime import datetime
+from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Logging setup
@@ -59,6 +61,79 @@ def async_run(coro):
 # Config override builder
 # ---------------------------------------------------------------------------
 
+def direct_path_overrides(
+    *,
+    audio_path: str | Path | None,
+    transcript_path: str | Path | None,
+    manifest_path: str | Path | None,
+    reference_path: str | Path | None = None,
+    comparison_report_path: str | Path | None = None,
+    cwd: Path | None = None,
+) -> dict[str, Path]:
+    """Map the simple path interface onto the existing typed configuration."""
+    base = (cwd or Path.cwd()).resolve()
+
+    def resolve(value: str | Path | None, default: str | Path) -> Path:
+        candidate = Path(value if value is not None else default).expanduser()
+        if not candidate.is_absolute():
+            candidate = base / candidate
+        return candidate.resolve()
+
+    audio = resolve(audio_path, "audio")
+    transcripts = resolve(transcript_path, "transcriptions")
+    manifest = resolve(manifest_path, "manifest.json")
+    text_parent = transcripts.parent
+    references = resolve(
+        reference_path,
+        text_parent / "reference-transcripts",
+    )
+    comparisons = resolve(
+        comparison_report_path,
+        text_parent / "comparison-reports",
+    )
+    candidates = text_parent / "candidates"
+    reports = text_parent / "reports"
+
+    audio_root = audio.parent
+    text_root = Path(
+        os.path.commonpath(
+            (
+                transcripts.parent,
+                manifest.parent,
+                references.parent,
+                comparisons.parent,
+                candidates.parent,
+                reports.parent,
+            )
+        )
+    )
+    try:
+        audio_root.relative_to(text_root)
+        roots_are_nested = audio_root != text_root
+    except ValueError:
+        try:
+            text_root.relative_to(audio_root)
+            roots_are_nested = audio_root != text_root
+        except ValueError:
+            roots_are_nested = False
+    if roots_are_nested:
+        shared_root = Path(os.path.commonpath((audio_root, text_root)))
+        audio_root = shared_root
+        text_root = shared_root
+
+    return {
+        "audio_repo__path": audio_root,
+        "transcript_repo__path": text_root,
+        "paths__audio_dir": audio,
+        "paths__transcriptions_dir": transcripts,
+        "paths__manifest_file": manifest,
+        "paths__artifacts_dir": candidates,
+        "paths__reports_dir": reports,
+        "paths__reference_dir": references,
+        "paths__comparison_reports_dir": comparisons,
+    }
+
+
 def build_overrides(args: argparse.Namespace) -> dict:
     """
     Translate CLI arguments into Config.load() override kwargs.
@@ -75,6 +150,32 @@ def build_overrides(args: argparse.Namespace) -> dict:
         overrides["audio_repo__path"] = args.audio_repo
     if getattr(args, "transcript_repo", None):
         overrides["transcript_repo__path"] = args.transcript_repo
+
+    # The primary path contract is deliberately direct: callers name the audio
+    # directory, transcript directory, and manifest file they want.  Repository
+    # roots remain compatibility aliases and are derived internally when any
+    # direct path is supplied.
+    direct_values = (
+        getattr(args, "audio_path", None),
+        getattr(args, "transcript_path", None),
+        getattr(args, "manifest_path", None),
+        getattr(args, "reference_path", None),
+        getattr(args, "comparison_report_path", None),
+    )
+    if any(value is not None for value in direct_values):
+        overrides.update(
+            direct_path_overrides(
+                audio_path=getattr(args, "audio_path", None),
+                transcript_path=getattr(args, "transcript_path", None),
+                manifest_path=getattr(args, "manifest_path", None),
+                reference_path=getattr(args, "reference_path", None),
+                comparison_report_path=getattr(
+                    args,
+                    "comparison_report_path",
+                    None,
+                ),
+            )
+        )
 
     # Telegram group override (download / run)
     if getattr(args, "group", None):
@@ -100,6 +201,19 @@ def build_overrides(args: argparse.Namespace) -> dict:
             overrides["source__mode"] = "folder"
 
     return overrides
+
+
+def _max_word_error_rate_arg(value: str) -> float:
+    """Argparse adapter for the verifier's inclusive 0..1 threshold."""
+    from src.transcript_compare import (
+        ComparisonInputError,
+        validate_max_word_error_rate,
+    )
+
+    try:
+        return validate_max_word_error_rate(value)
+    except ComparisonInputError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -154,6 +268,31 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         dest="transcript_repo",
         help="Override transcript_repo.path (text, candidates, and reports).",
+    )
+    parser.add_argument(
+        "--audio-path",
+        default=os.environ.get("AUDIO_PATH"),
+        help="Audio directory; relative paths resolve from the current workspace.",
+    )
+    parser.add_argument(
+        "--transcript-path",
+        default=os.environ.get("TRANSCRIPT_PATH"),
+        help="Generated transcript directory; relative paths resolve from cwd.",
+    )
+    parser.add_argument(
+        "--manifest-path",
+        default=os.environ.get("MANIFEST_PATH"),
+        help="Durable manifest file; relative paths resolve from cwd.",
+    )
+    parser.add_argument(
+        "--reference-path",
+        default=os.environ.get("REFERENCE_PATH"),
+        help="Reference transcript directory used by verify.",
+    )
+    parser.add_argument(
+        "--comparison-report-path",
+        default=os.environ.get("COMPARISON_REPORT_PATH"),
+        help="JSON comparison-report directory used by verify.",
     )
     parser.add_argument(
         "--verbose",
@@ -277,6 +416,50 @@ def build_parser() -> argparse.ArgumentParser:
         "--audio-repository-branch",
         default=os.environ.get("OCTOSCRIBE_AUDIO_REPOSITORY_BRANCH"),
         help="Optional caller-supplied source branch recorded as provenance.",
+    )
+
+    # ---- verify --------------------------------------------------------
+    verify_parser = subparsers.add_parser(
+        "verify",
+        help="Compare generated transcripts to reference text word-for-word.",
+    )
+    verify_parser.add_argument(
+        "--reference-dir",
+        type=Path,
+        help="Override the configured directory of committed reference .txt files.",
+    )
+    verify_parser.add_argument(
+        "--comparison-reports-dir",
+        type=Path,
+        help="Override the configured JSON comparison-report directory.",
+    )
+    verify_parser.add_argument(
+        "--allow-missing-references",
+        action="store_false",
+        dest="reference_required",
+        default=True,
+        help=(
+            "Bootstrap provenance only: record references as optional in the "
+            "summary. Missing references still do not verify successfully."
+        ),
+    )
+    verify_parser.add_argument(
+        "--capture-reference",
+        action="store_true",
+        help=(
+            "Copy generated transcripts into an empty reference directory; "
+            "intended only for deliberate manual baseline capture."
+        ),
+    )
+    verify_parser.add_argument(
+        "--max-word-error-rate",
+        type=_max_word_error_rate_arg,
+        default=os.environ.get("MAX_WORD_ERROR_RATE", "0"),
+        help=(
+            "Maximum accepted word error rate from 0 to 1 (default: "
+            "MAX_WORD_ERROR_RATE or strict 0). Numeric and negation changes "
+            "always fail regardless of this tolerance."
+        ),
     )
 
     # ---- status --------------------------------------------------------
@@ -516,6 +699,32 @@ def cmd_transcribe(args: argparse.Namespace, config) -> None:
         sys.exit(1)
 
 
+def cmd_verify(args: argparse.Namespace, config) -> None:
+    """Compare generated transcripts to references without changing either."""
+    from src.transcript_compare import (
+        ComparisonInputError,
+        compare_transcript_directories,
+        comparison_output_lines,
+    )
+
+    try:
+        summary = compare_transcript_directories(
+            config.transcribe.transcriptions_dir,
+            args.reference_dir or config.transcribe.reference_dir,
+            args.comparison_reports_dir or config.transcribe.comparison_reports_dir,
+            reference_required=args.reference_required,
+            capture_reference=args.capture_reference,
+            max_word_error_rate=getattr(args, "max_word_error_rate", 0.0),
+        )
+    except (ComparisonInputError, OSError, ValueError) as exc:
+        print(f"ERROR: Transcript verification failed: {exc}", file=sys.stderr)
+        sys.exit(1)
+    for line in comparison_output_lines(summary):
+        print(line)
+    if not summary["success"]:
+        sys.exit(1)
+
+
 def cmd_status(args: argparse.Namespace, config) -> None:
     """Show pipeline status."""
     from src.manifest import Manifest
@@ -745,6 +954,7 @@ def main() -> None:
         "run": cmd_run,
         "download": cmd_download,
         "transcribe": cmd_transcribe,
+        "verify": cmd_verify,
         "status": cmd_status,
         "debug": cmd_debug,
         "ci-export": cmd_ci_export,

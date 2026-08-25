@@ -108,6 +108,8 @@ class TranscribeConfig:
     arbitration_limit: int = 1
     artifacts_dir: Optional[Path] = None
     reports_dir: Optional[Path] = None
+    reference_dir: Optional[Path] = None
+    comparison_reports_dir: Optional[Path] = None
 
 
 @dataclass

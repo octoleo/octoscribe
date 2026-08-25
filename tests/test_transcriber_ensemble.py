@@ -43,11 +43,20 @@ def test_transcriber_records_truthful_ensemble_state_and_provenance(tmp_path: Pa
     engine = MagicMock()
     engine.transcribe.return_value = SimpleNamespace(
         text="Do not fear.",
-        quality_state=QualityState.NEEDS_REVIEW,
+        quality_state=QualityState.COMPLETED_WITH_WARNINGS,
         audio_sha256="a" * 64,
         duration_ms=1234,
         evidence_report_path=report,
         unresolved_discrepancies=1,
+        seams=(SimpleNamespace(left_chunk=0, right_chunk=1, alignment=None),),
+        provider_failures=(
+            SimpleNamespace(
+                provider="xai",
+                attempt=1,
+                role="checker",
+                error="temporary outage",
+            ),
+        ),
     )
 
     with (
@@ -64,8 +73,9 @@ def test_transcriber_records_truthful_ensemble_state_and_provenance(tmp_path: Pa
         result = Transcriber(config, manifest).run()
 
     assert result.succeeded == 1
-    assert result.needs_review == 1
-    assert (out_dir / "needs-review" / "sermon.txt").read_text() == "Do not fear."
+    assert result.completed_with_warnings == 1
+    assert (out_dir / "sermon.txt").read_text() == "Do not fear."
+    assert not (out_dir / "needs-review").exists()
     audio_hash = hashlib.sha256(b"AUDIO").hexdigest()
     engine.transcribe.assert_called_once_with(
         audio,
@@ -75,12 +85,12 @@ def test_transcriber_records_truthful_ensemble_state_and_provenance(tmp_path: Pa
     manifest.mark_transcribed.assert_called_once_with(
         "42",
         {
-            "output_file": "needs-review/sermon.txt",
-            "output_path": "transcriptions/needs-review/sermon.txt",
+            "output_file": "sermon.txt",
+            "output_path": "transcriptions/sermon.txt",
             "audio_path": "audio/sermon.mp3",
             "model": "openai-model",
             "transcript_sha256": hashlib.sha256(b"Do not fear.").hexdigest(),
-            "quality_state": "needs_review",
+            "quality_state": "completed_with_warnings",
             "providers": ["openai", "xai"],
             "models": {
                 "openai": "openai-model",
@@ -91,5 +101,24 @@ def test_transcriber_records_truthful_ensemble_state_and_provenance(tmp_path: Pa
             "duration_ms": 1234,
             "evidence_report": "reports/sermon.evidence.json",
             "unresolved_discrepancies": 1,
+            "provider_failures": [
+                {
+                    "provider": "xai",
+                    "attempt": 1,
+                    "role": "checker",
+                    "error": "temporary outage",
+                }
+            ],
+            "integrity_warnings": [
+                {"kind": "provider_disagreement", "count": 1},
+                {"kind": "unaligned_seam", "left_chunk": 0, "right_chunk": 1},
+                {
+                    "kind": "provider_failure",
+                    "provider": "xai",
+                    "attempt": 1,
+                    "role": "checker",
+                    "error": "temporary outage",
+                },
+            ],
         },
     )

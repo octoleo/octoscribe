@@ -13,14 +13,55 @@ The Telegram durations in `manifest.json` are preserved exactly as reported by
 Telegram and may differ by about one second from the container duration that
 ffprobe reports.
 
+The fixture workflow uses the normal three-path contract:
+
+```text
+AUDIO_PATH=tests/fixtures/telegram/audio
+TRANSCRIPT_PATH=tests/fixtures/telegram/transcriptions
+MANIFEST_PATH=tests/fixtures/telegram/manifest.json
+```
+
+The reference and comparison paths are the derived siblings
+`reference-transcripts/` and `comparison-reports/` under the same fixture root.
+
 Normal CI probes the complete durations, derives the real silence-aware chunk
-plans, and decodes short windows without sending audio anywhere. The paid
-OpenAI integration job is eligible only after a pull request is merged into
-`v1`, and requires the repository secret `OPENAI_API_KEY`. It transcribes both
-complete recordings and then reruns the same action to prove idempotence. The
-post-merge release regression requires each result to agree with its recorded
-seam evidence: fully aligned seams publish as `machine_transcribed`; any
-unaligned seam must publish as `needs_review` under the quarantine directory.
-The fixtures do not include human-verified reference transcripts, so that live
-job proves transport, chunking, conservative seaming, publication, evidence,
-and repeat-run consistency—not word-error accuracy.
+plans, and decodes short windows without sending audio anywhere. The separate
+`.github/workflows/openai-real-audio.yml` workflow requires the repository
+secret `OPENAI_API_KEY`, transcribes both complete recordings through
+`uses: ./`, runs OctoScribe's `command: verify` path, and uploads the generated
+manifest, transcripts, candidates, evidence reports, comparison reports, and
+reference files as workflow artifacts. Committed references live under
+`reference-transcripts/`; machine-readable added/deleted/substituted-word
+reports are written under `comparison-reports/`.
+
+Manual capture mode is the only way that workflow produces bootstrap machine
+reference files; its artifact can be inspected and deliberately committed. A
+run after merge into `v1` requires those committed references and compares
+generated text with them word-for-word, normalizing only case, punctuation, and
+whitespace. Added, deleted, and substituted spoken words are reported
+explicitly. Fully aligned seams publish as
+`machine_transcribed`; any unaligned seam publishes normally as
+`completed_with_warnings`. Both results remain under `transcriptions/`; neither
+is withheld or moved to a separate output area.
+
+The verifier itself remains strict by default (`max_word_error_rate: 0`). This
+paid regression workflow explicitly uses a narrow `0.0025` (0.25%) ceiling for
+each transcript because API output can vary slightly from its machine-generated
+reference. Reports still record `exact_spoken_word_match`, exact word/error
+counts, the WER, and every individual difference. Numeric-token and common
+negation differences fail regardless of the configured ceiling, as do missing
+generated or reference files. Tolerance changes only the workflow pass/fail
+gate; it never changes, suppresses, or rewrites transcript text.
+
+The direct verifier command supplies `--transcript-path`, `--reference-path`,
+and `--comparison-report-path` before `verify`.
+`--allow-missing-references --capture-reference` is limited to intentional
+manual bootstrap and is not used by merge-triggered validation.
+
+The committed references and uploaded outputs are machine reference
+transcripts, not automatically human-verified ground truth. They prove real
+transport, chunking, conservative seaming, publication, evidence, drift
+detection, and repeat-run consistency. Word-error accuracy can be claimed only
+for a reference that a person separately checked while listening to the
+complete source audio. No quality state performs theological judgment, content
+moderation, or approval of the Christian material.

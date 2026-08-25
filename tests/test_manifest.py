@@ -184,7 +184,12 @@ def test_pending_transcription_empty_when_all_transcribed(tmp_path: Path) -> Non
 
 @pytest.mark.parametrize(
     "quality_state",
-    ["machine_transcribed", "cross_checked", "needs_review", "human_verified"],
+    [
+        "machine_transcribed",
+        "cross_checked",
+        "completed_with_warnings",
+        "human_verified",
+    ],
 )
 def test_quality_states_are_terminal_without_claiming_completed(
     tmp_path: Path, quality_state: str
@@ -203,12 +208,41 @@ def test_quality_states_are_terminal_without_claiming_completed(
     assert m.get_entry(1)["transcription"]["status"] == quality_state
 
 
+def test_legacy_needs_review_manifest_state_remains_terminal(tmp_path: Path) -> None:
+    path = tmp_path / "manifest.json"
+    path.write_text(
+        json.dumps(
+            {
+                "1": {
+                    **_sample_metadata(1),
+                    "transcription": {
+                        **_sample_transcription_result(),
+                        "status": "needs_review",
+                        "quality_state": "needs_review",
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    manifest = Manifest(path)
+
+    assert manifest.is_transcribed(1)
+    assert manifest.pending_transcription() == []
+    assert manifest.quality_stats()["legacy_needs_review"] == 1
+    assert manifest.quality_stats()["completed_with_warnings"] == 0
+
+
 def test_human_verification_is_explicit_and_auditable(tmp_path: Path) -> None:
     m = Manifest(tmp_path / "manifest.json")
     m.mark_downloaded(1, _sample_metadata(1))
     m.mark_transcribed(
         1,
-        {**_sample_transcription_result(), "quality_state": "needs_review"},
+        {
+            **_sample_transcription_result(),
+            "quality_state": "completed_with_warnings",
+        },
     )
     m.mark_human_verified(1, reviewer="reviewer@example.org")
     transcription = m.get_entry(1)["transcription"]

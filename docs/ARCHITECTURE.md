@@ -18,10 +18,14 @@ The implementation is organized around these non-negotiable rules:
    the continuation prefix.
 6. Discrepancy resolution is bounded to at most one two-provider retry and one
    third-provider arbitration pass.
-7. Unresolved provider or seam differences become `needs_review`.
-8. Only explicit human comparison against the audio can produce
-   `human_verified`.
-9. OctoScribe performs no Git operations. In the recommended production
+7. Unresolved provider or seam differences become
+   `completed_with_warnings`; the transcript is still completed and published
+   in the normal output directory.
+8. Technical fidelity warnings never become content moderation, theological
+   evaluation, censorship, or a publication gate.
+9. Only explicit human comparison against the audio can produce
+   `human_verified`; that provenance is not required for normal publication.
+10. OctoScribe performs no Git operations. In the recommended production
    workflow, the caller commits audio and its manifest checkpoint before
    invoking transcription with the captured revision and branch.
 
@@ -32,16 +36,16 @@ machine-only guarantee that every spoken word was recognized correctly.
 
 ```mermaid
 flowchart TD
-    A["Telegram or folder"] --> B["Copy, hash, manifest"]
+    A["Telegram or source_folder"] --> B["Acquire into AUDIO_PATH; hash into MANIFEST_PATH"]
     B --> C["Caller checkpoints audio + index"]
     C --> D["Caller supplies revision; plan chunks"]
     D --> E["One to three ASR providers"]
     E --> F["Compare and bounded retry"]
     F --> G["Deterministic seam"]
-    G --> H{"All gates clear?"}
-    H -->|yes| I["Machine or cross-checked text"]
-    H -->|no| J["Needs-review quarantine"]
-    I --> K["Candidates, report, manifest"]
+    G --> H{"Technical warnings?"}
+    H -->|no| I["Machine or cross-checked text"]
+    H -->|yes| J["Completed text with warnings"]
+    I --> K["Normal transcript output + evidence"]
     J --> K
 ```
 
@@ -67,12 +71,43 @@ The primary components are:
 CLI override > process environment or .env > INI > built-in default
 ```
 
+The supported and CI-tested Python range is 3.11 through 3.14. The composite
+action standardizes its execution on Python 3.14, including on runners whose
+preinstalled default Python differs.
+
 Credentials are read from environment variables. INI files hold non-secret
 policy such as source mode, model names, chunk dimensions, and local workspace
 paths. Repository URLs, branches, and Git credentials are caller concerns and
 are not part of the transcription engine. Validation is command-aware: folder
 acquisition does not require Telegram credentials, while Telegram `run`,
 `download`, and `debug` do.
+
+### Primary path contract
+
+The public placement model has exactly three independent paths:
+
+| Environment | Action input | Default | Direction |
+| --- | --- | --- | --- |
+| `AUDIO_PATH` | `audio_path` | `./audio` | Acquisition writes; transcription reads. |
+| `TRANSCRIPT_PATH` | `transcript_path` | `./transcriptions` | Transcription writes completed text. |
+| `MANIFEST_PATH` | `manifest_path` | `./manifest.json` | Acquisition and transcription read/update persistent state. |
+
+For the composite action, each non-empty action input wins over the inherited
+environment variable, which wins over the effective default. Input metadata may
+use an empty schema default so inheritance works; the effective runtime defaults
+remain the values in the table.
+
+Relative values resolve against `GITHUB_WORKSPACE` in the action and against
+the current working directory locally; absolute values remain absolute. Each
+path may point anywhere in the caller's checked-out workspace, so same-repo,
+one-data-repo, and separate audio/text repositories need no internal layout
+mode.
+
+Candidates and aggregate reports derive as `candidates/` and `reports/` beside
+`TRANSCRIPT_PATH`. Verify-only reference and comparison paths similarly default
+to `reference-transcripts/` and `comparison-reports/` beside it. Legacy data,
+audio-repository, and transcript-repository root settings remain advanced
+compatibility shorthands where supported; they are not the primary model.
 
 ### Provider discovery
 
@@ -107,52 +142,50 @@ exclusive so there is only one active selection policy.
 ### Telegram
 
 `TelegramDownloader` scans the configured group, recognizes supported audio,
-creates collision-safe filenames, downloads into the audio repository, hashes
-the completed file, and records metadata in the text repository's manifest.
-Its Telethon session lives outside both evidence repositories by default.
+creates collision-safe filenames, downloads into `AUDIO_PATH`, hashes the
+completed file, and records metadata in `MANIFEST_PATH`. Its Telethon session
+lives outside the configured evidence paths by default.
 
 ### Folder
 
-`FolderImporter` scans the configured directory recursively or non-recursively,
-copies recognized audio into the same audio directory used by Telegram, hashes
-the source and copied file, and rejects a mismatched copy. Its manifest key is
-content-derived, so identical bytes are deduplicated independently of filename
-or directory. It also reads safe textual embedded tags and technical container
-properties through mutagen (including title/artist, album, date, duration,
-codec, bitrate, sample rate, and channels) without treating metadata failure as
-an acquisition failure. Binary tags such as cover art are not copied into JSON.
+`FolderImporter` scans the configured `source_folder` recursively or
+non-recursively, copies recognized files into `AUDIO_PATH`, verifies the source
+and copied SHA-256 values, and then records them in `MANIFEST_PATH`. Its manifest
+key is content-derived, so identical bytes are deduplicated independently of
+filename or directory. It also reads safe textual embedded tags and technical
+container properties through mutagen (including title/artist, album, date,
+duration, codec, bitrate, sample rate, and channels) without treating metadata
+failure as an acquisition failure. Binary tags such as cover art are not copied
+into JSON. `command: transcribe` skips acquisition and reads files already
+indexed in `AUDIO_PATH`.
 
 After acquisition, both sources are indistinguishable to the transcription
 pipeline: each manifest entry points to an audio filename and SHA-256 digest.
-On success, the transcription object adds repository-relative `audio_path` and
-`output_path` values while retaining the legacy `output_file`, so the manifest
-is the direct audio-to-text index for shared and split layouts.
+On success, the transcription object adds `audio_path` and `output_path` values
+while retaining the legacy `output_file`, so the manifest is the direct
+audio-to-text index regardless of repository placement.
 
 ## Audio integrity and caller-owned publication
 
-The recommended configuration uses two caller-prepared worktrees:
-
-- the audio repository contains `audio/`;
-- the text repository contains `manifest.json`, `transcriptions/`,
-  `candidates/`, and `reports/`.
-
-Shared worktrees remain supported when only `[data_repo]` or `DATA_REPO_PATH`
-is configured. These names describe directory layout, not a remote-management
-feature.
+The caller prepares whatever checkouts contain `AUDIO_PATH`, `TRANSCRIPT_PATH`,
+and `MANIFEST_PATH`. All three may live in the workflow repository, all three
+may live in one separately checked-out data repository, or the audio path may
+live in a different repository from the transcript and manifest paths. The
+engine behavior is identical because it consumes paths, not repository layout.
 
 The composite action does not inspect Git state and never clones, pulls,
 commits, or pushes. The full reference workflow owns this production order:
 
-1. use `octoleo/git-user@v2` and clone the desired worktrees and branches;
-2. invoke `download` to acquire audio and save the persistent manifest;
-3. commit and push exact audio bytes; in shared layout checkpoint audio and
-   manifest together;
-4. in split layout, separately commit and push the manifest checkpoint so an
-   ephemeral-runner failure cannot lose downloaded state;
-5. capture the audio commit revision and current branch;
-6. invoke `transcribe` with `audio_revision` and
+1. check out whichever repositories own the three paths;
+2. pass `audio_path`, `transcript_path`, and `manifest_path` to the action;
+3. invoke `download` to write Telegram downloads or verified copies from
+   `source_folder` into `AUDIO_PATH`, or use `transcribe` when audio is already
+   acquired and indexed there;
+4. preserve exact audio bytes and the manifest checkpoint;
+5. optionally capture the audio revision and current branch;
+6. invoke `transcribe` with the same paths and, when available, `audio_revision` and
    `audio_repository_branch`;
-7. commit and push the manifest, candidates, reports, and published text.
+7. preserve the updated manifest, published text, and derived evidence paths.
 
 The workflow uses `continue-on-error` only to reach checkpoint steps. It then
 propagates the original action failure after saving available audio, index, or
@@ -250,14 +283,14 @@ stateDiagram-v2
     Fallback --> FallbackRetry: third differs from primary
     Fallback --> AvailabilityRetry: third is unavailable
     FallbackRetry --> CrossChecked: active pair agrees
-    FallbackRetry --> NeedsReview: active pair still differs
+    FallbackRetry --> CompletedWithWarnings: active pair still differs
     AvailabilityRetry --> CrossChecked: base pair recovers and agrees
-    AvailabilityRetry --> NeedsReview: base pair remains unresolved
+    AvailabilityRetry --> CompletedWithWarnings: base pair remains unresolved
     BaseRetry --> CrossChecked: latest base pair agrees
     BaseRetry --> Arbitrate: still differs and third is unused
-    BaseRetry --> NeedsReview: still differs and no third
+    BaseRetry --> CompletedWithWarnings: still differs and no third
     Arbitrate --> CrossChecked: primary has independent support
-    Arbitrate --> NeedsReview: primary remains unsupported
+    Arbitrate --> CompletedWithWarnings: primary remains unsupported
 ```
 
 Important details:
@@ -287,7 +320,10 @@ Important details:
 normalized, case-folded, and stripped of punctuation for alignment, but each
 original transcript remains available. Differences are classified as
 additions, deletions, or substitutions. Disagreements touching negations,
-numbers, or recognized Scripture references are marked critical for review.
+numbers, or recognized Scripture references receive a high technical-fidelity
+warning in the evidence report. This classification describes transcription
+risk only; it performs no theological interpretation or content moderation and
+does not control publication.
 
 ## Conservative stitching
 
@@ -303,9 +339,10 @@ tokens from the left suffix and right prefix. Production defaults require:
 
 On acceptance, only the proven duplicated prefix of the continuation is
 omitted. The left surface is retained byte-for-byte. On rejection, both
-surfaces are joined without deletion and the recording becomes `needs_review`.
-This can leave duplicated words in a review copy, which is safer than silently
-deleting possibly spoken words.
+surfaces are joined without deletion, the transcript is published in the same
+normal output directory, and the recording becomes `completed_with_warnings`.
+This can leave duplicated words in the completed transcript, which is safer
+than silently deleting possibly spoken words.
 
 After stitching, publication normalization is whitespace-only: line endings,
 trailing spaces, and excessive blank lines are made deterministic. Spoken words
@@ -335,9 +372,10 @@ raises an evidence conflict instead of overwriting history.
 
 The per-recording report contains all chunk attempts, the canonical provider
 and attempt, stage-specific pair comparisons, exact disagreement token spans,
-critical categories, bounded provider failures, seam decisions, final quality
-state, final transcript SHA-256, and the caller-supplied audio repository
-branch/revision when available.
+technical-priority categories (stored in the schema's `critical` field),
+bounded provider failures, seam decisions, final quality state, final
+transcript SHA-256, and the caller-supplied audio repository branch/revision
+when available.
 Existing evidence cannot be silently removed or replaced by an update.
 
 The manifest links the published text to its report, records providers,
@@ -345,6 +383,12 @@ primary provider, audio and transcript hashes, duration, discrepancy count,
 provider failures, quality state, and source revision when available. Error
 strings are whitespace-normalized, bounded, and scrubbed of configured API
 keys before persistence.
+
+The transcription object also records structured `integrity_warnings`. Current
+warning kinds identify provider disagreement, an unaligned adjacent-chunk seam,
+or a provider failure; a defensive `automated_comparison_incomplete` warning
+prevents `completed_with_warnings` from ever being opaque. These records explain
+technical uncertainty while leaving the completed text in its normal location.
 
 Before selecting work, `Transcriber` reconciles terminal manifest entries with
 the filesystem. An entry is skipped only when `output_file` is a safe relative
@@ -360,11 +404,40 @@ or modified text.
 | --- | --- | --- |
 | `machine_transcribed` | One configured provider produced non-empty text; no independent agreement exists. | `transcriptions/` |
 | `cross_checked` | At least two configured providers agreed on normalized words for every chunk and every required seam was proven. | `transcriptions/` |
-| `needs_review` | An unresolved disagreement, lack of independent verification, or unproven overlap seam remains. | `transcriptions/needs-review/` |
-| `human_verified` | A human explicitly compared the transcript with the source audio. | Recorded in manifest after review |
+| `completed_with_warnings` | The canonical transcript is complete and normally published, while unresolved provider disagreement, unavailable independent verification, or an unproven overlap seam is retained as technical fidelity evidence. | `transcriptions/` |
+| `human_verified` | A human explicitly compared the transcript with the source audio; this is additional provenance, not a publication requirement. | `transcriptions/` |
 
-`needs_review` is terminal for automation so the same paid work is not repeated
-forever. It is a quarantine state, not a correctness claim.
+`completed_with_warnings` is terminal for automation so the same paid work is
+not repeated forever. It is a completed result and remains ordinary output.
+The warning is not a judgment about the sermon, its theology, or whether anyone
+may use or publish it.
+
+## Real-audio reference regression
+
+`.github/workflows/openai-real-audio.yml` is intentionally separate from
+credential-free CI. It demonstrates the same boundary as a consuming project:
+check out the code, invoke the composite action through `uses: ./`, run
+OctoScribe's `command: verify` path, and upload the generated workspace and
+comparison results. References resolve under
+`tests/fixtures/telegram/reference-transcripts/`; comparison JSON resolves
+under `tests/fixtures/telegram/comparison-reports/`. The workflow does not embed
+an alternative transcription or comparison implementation in inline Python.
+
+Manual capture mode may produce bootstrap machine-reference files for deliberate
+inspection and commit. A merge-triggered run requires committed references and
+cannot replace them. The verifier compares generated and reference word
+sequences after normalizing only case, punctuation, and whitespace, and records
+added, deleted, and substituted spoken words.
+
+The direct CLI contract supplies `--transcript-path`, `--reference-path`, and
+`--comparison-report-path`, then invokes `verify`. Only intentional manual
+bootstrap adds `--allow-missing-references --capture-reference`; merged
+validation never does.
+
+This is a deterministic drift contract, not a claim that the reference is
+ground truth. A captured or committed machine transcript remains a machine
+reference unless a person separately compares it with the complete source audio
+and records human-verified provenance.
 
 ## Failure containment
 
@@ -392,10 +465,10 @@ To add an ASR provider:
 5. add adapter contract, error, retry, secret-redaction, and ensemble tests;
 6. update both configuration templates and this document.
 
-Do not add a generic language-model correction stage. If a future component
-suggests edits, it must preserve the raw primary output, identify every proposed
-change, require an explicit review policy, and never promote itself to
-`human_verified`.
+Do not add a generic language-model correction stage. If a future optional
+component suggests edits, it must preserve the raw primary output, identify
+every proposed change, remain separate from normal transcript publication, and
+never promote itself to `human_verified`.
 
 ## Related documentation
 

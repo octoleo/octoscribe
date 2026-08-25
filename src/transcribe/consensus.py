@@ -2,8 +2,9 @@
 
 This module deliberately does *not* construct a "best" transcript.  It keeps
 every provider's original text unchanged, aligns normalized word views for
-comparison, and reports the differences as evidence for a later retry,
-independent arbiter, or human review.
+comparison, and reports the differences as evidence for a later retry or
+independent arbiter.  Exhausted comparison still completes with the primary
+transcript unchanged and records warnings alongside it.
 
 Normalization is comparison-only: case, punctuation, and whitespace do not
 create discrepancies.  The original strings and the original spelling of
@@ -26,7 +27,7 @@ class QualityState(str, Enum):
 
     MACHINE_TRANSCRIBED = "machine_transcribed"
     CROSS_CHECKED = "cross_checked"
-    NEEDS_REVIEW = "needs_review"
+    COMPLETED_WITH_WARNINGS = "completed_with_warnings"
     HUMAN_VERIFIED = "human_verified"
 
 
@@ -59,7 +60,7 @@ class ResolutionAction(str, Enum):
     ACCEPT = "accept"
     RETRY = "retry"
     ARBITRATE = "arbitrate"
-    REQUIRE_HUMAN_REVIEW = "require_human_review"
+    COMPLETE_WITH_WARNINGS = "complete_with_warnings"
 
 
 @dataclass(frozen=True, order=True)
@@ -630,7 +631,7 @@ def quality_state_for(
         return QualityState.MACHINE_TRANSCRIBED
     if all_agree is True:
         return QualityState.CROSS_CHECKED
-    return QualityState.NEEDS_REVIEW
+    return QualityState.COMPLETED_WITH_WARNINGS
 
 
 def compare_transcripts(
@@ -690,8 +691,8 @@ def next_resolution_decision(
     """Choose the next bounded action without calling a provider.
 
     Disagreement permits one retry, then at most one optional arbiter pass.
-    Continued disagreement stops at human review; the policy never loops and
-    never manufactures a replacement transcript.
+    Continued disagreement completes with warnings; the policy never loops,
+    never blocks publication, and never manufactures a replacement transcript.
     """
     progress = progress or ResolutionProgress()
     if progress.human_verified:
@@ -719,19 +720,20 @@ def next_resolution_decision(
     if not progress.retry_completed:
         return ResolutionDecision(
             ResolutionAction.RETRY,
-            QualityState.NEEDS_REVIEW,
+            QualityState.COMPLETED_WITH_WARNINGS,
             "Discrepancies remain; use the single permitted retry.",
         )
     if arbiter_available and not progress.arbiter_completed:
         return ResolutionDecision(
             ResolutionAction.ARBITRATE,
-            QualityState.NEEDS_REVIEW,
+            QualityState.COMPLETED_WITH_WARNINGS,
             "The retry still disagrees; use the single optional arbiter pass.",
         )
     return ResolutionDecision(
-        ResolutionAction.REQUIRE_HUMAN_REVIEW,
-        QualityState.NEEDS_REVIEW,
-        "Automated resolution is exhausted; preserve all evidence for review.",
+        ResolutionAction.COMPLETE_WITH_WARNINGS,
+        QualityState.COMPLETED_WITH_WARNINGS,
+        "Automated comparison is exhausted; publish the unchanged primary "
+        "transcript and preserve all discrepancy evidence as warnings.",
     )
 
 

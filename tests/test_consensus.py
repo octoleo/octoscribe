@@ -72,7 +72,7 @@ def test_substitution_surfaces_both_original_token_spans() -> None:
     assert discrepancy.right_span == TokenSpan(1, 2)
     assert discrepancy.left_tokens == ("is",)
     assert discrepancy.right_tokens == ("was",)
-    assert report.quality_state is QualityState.NEEDS_REVIEW
+    assert report.quality_state is QualityState.COMPLETED_WITH_WARNINGS
 
 
 def test_inserted_negation_is_elevated_as_critical() -> None:
@@ -152,7 +152,7 @@ def test_three_transcripts_compare_every_pair_without_majority_rewrite() -> None
     ]
     assert [item.agrees for item in report.comparisons] == [True, False, False]
     assert tuple(item.original for item in report.transcripts) == originals
-    assert report.quality_state is QualityState.NEEDS_REVIEW
+    assert report.quality_state is QualityState.COMPLETED_WITH_WARNINGS
     assert "consensus_text" not in {field.name for field in fields(report)}
     assert not hasattr(report, "consensus_text")
 
@@ -174,7 +174,7 @@ def test_repeated_words_align_deterministically_without_autojunk() -> None:
     [
         (1, None, False, QualityState.MACHINE_TRANSCRIBED),
         (2, True, False, QualityState.CROSS_CHECKED),
-        (3, False, False, QualityState.NEEDS_REVIEW),
+        (3, False, False, QualityState.COMPLETED_WITH_WARNINGS),
         (1, None, True, QualityState.HUMAN_VERIFIED),
         (3, False, True, QualityState.HUMAN_VERIFIED),
     ],
@@ -231,8 +231,8 @@ def test_resolution_rejects_non_primary_two_of_three_after_arbitration() -> None
         primary_label="primary",
     )
 
-    assert decision.action is ResolutionAction.REQUIRE_HUMAN_REVIEW
-    assert decision.quality_state is QualityState.NEEDS_REVIEW
+    assert decision.action is ResolutionAction.COMPLETE_WITH_WARNINGS
+    assert decision.quality_state is QualityState.COMPLETED_WITH_WARNINGS
 
 
 def test_resolution_allows_exactly_one_retry_then_one_arbiter() -> None:
@@ -248,8 +248,8 @@ def test_resolution_allows_exactly_one_retry_then_one_arbiter() -> None:
     progress = progress.after(arbiter.action)
 
     exhausted = next_resolution_decision(report, progress, arbiter_available=True)
-    assert exhausted.action is ResolutionAction.REQUIRE_HUMAN_REVIEW
-    assert exhausted.quality_state is QualityState.NEEDS_REVIEW
+    assert exhausted.action is ResolutionAction.COMPLETE_WITH_WARNINGS
+    assert exhausted.quality_state is QualityState.COMPLETED_WITH_WARNINGS
     with pytest.raises(ValueError, match="retry"):
         progress.after(ResolutionAction.RETRY)
     with pytest.raises(ValueError, match="arbiter"):
@@ -262,7 +262,7 @@ def test_resolution_skips_unavailable_arbiter_after_retry() -> None:
 
     decision = next_resolution_decision(report, progress, arbiter_available=False)
 
-    assert decision.action is ResolutionAction.REQUIRE_HUMAN_REVIEW
+    assert decision.action is ResolutionAction.COMPLETE_WITH_WARNINGS
 
 
 def test_human_verification_is_explicit_and_terminal() -> None:

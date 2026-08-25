@@ -39,7 +39,7 @@ class BatchStats:
     failed: int = 0
     skipped: int = 0
     total_elapsed_seconds: float = 0.0
-    needs_review: int = 0
+    completed_with_warnings: int = 0
 
     def add(self, result: TranscriptionResult) -> None:
         """Incorporate a single :class:`TranscriptionResult` into the totals."""
@@ -47,8 +47,8 @@ class BatchStats:
         self.total_elapsed_seconds += result.elapsed_seconds
         if result.success:
             self.succeeded += 1
-            if result.quality_state == "needs_review":
-                self.needs_review += 1
+            if result.quality_state == "completed_with_warnings":
+                self.completed_with_warnings += 1
         else:
             self.failed += 1
 
@@ -60,6 +60,6 @@ class BatchStats:
             f"succeeded={self.succeeded} "
             f"failed={self.failed} "
             f"skipped={self.skipped} "
-            f"needs_review={self.needs_review} "
+            f"completed_with_warnings={self.completed_with_warnings} "
             f"elapsed={self.total_elapsed_seconds:.1f}s"
         )

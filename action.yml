@@ -102,7 +102,19 @@ inputs:
     required: false
     default: ''
   data_repo_path:
-    description: 'Caller-prepared shared audio/transcript workspace'
+    description: 'Compatibility alias for a shared audio/transcript workspace'
+    required: false
+    default: ''
+  audio_path:
+    description: 'Audio directory; relative paths resolve from GITHUB_WORKSPACE'
+    required: false
+    default: ''
+  transcript_path:
+    description: 'Generated transcript directory'
+    required: false
+    default: ''
+  manifest_path:
+    description: 'Durable manifest/index file'
     required: false
     default: ''
   audio_revision:
@@ -113,8 +125,28 @@ inputs:
     description: 'Optional caller-supplied audio repository branch for provenance'
     required: false
     default: ''
+  reference_path:
+    description: 'Committed reference transcripts used by command=verify'
+    required: false
+    default: ''
+  comparison_report_path:
+    description: 'Destination for word-for-word JSON comparison reports'
+    required: false
+    default: ''
+  reference_required:
+    description: 'Reference requirement recorded in verify reports; missing evidence never passes'
+    required: false
+    default: 'true'
+  capture_reference:
+    description: 'Manual bootstrap: capture generated text into an empty reference_path'
+    required: false
+    default: 'false'
+  max_word_error_rate:
+    description: 'Verify tolerance from 0 to 1; default is exact spoken-word matching'
+    required: false
+    default: ''
   command:
-    description: 'Pipeline command: run | download | transcribe | status'
+    description: 'Pipeline command: run | download | transcribe | verify | status'
     required: false
     default: 'run'
   config_path:
@@ -142,14 +174,17 @@ outputs:
   reports_dir:
     description: 'Resolved directory containing provenance reports'
     value: ${{ steps.process.outputs.reports_dir }}
+  comparison_reports_dir:
+    description: 'Resolved directory containing transcript comparison reports'
+    value: ${{ steps.process.outputs.comparison_reports_dir }}
 
 runs:
   using: composite
   steps:
-    - name: Set up Python 3.11
+    - name: Set up Python 3.14
       uses: actions/setup-python@v5
       with:
-        python-version: '3.11'
+        python-version: '3.14'
 
     - name: Install ffmpeg
       if: ${{ inputs.command == 'run' || inputs.command == 'transcribe' }}
@@ -242,8 +277,16 @@ runs:
         INPUT_AUDIO_REPO_PATH: ${{ inputs.audio_repo_path }}
         INPUT_TRANSCRIPT_REPO_PATH: ${{ inputs.transcript_repo_path }}
         INPUT_DATA_REPO_PATH: ${{ inputs.data_repo_path }}
+        INPUT_AUDIO_PATH: ${{ inputs.audio_path }}
+        INPUT_TRANSCRIPT_PATH: ${{ inputs.transcript_path }}
+        INPUT_MANIFEST_PATH: ${{ inputs.manifest_path }}
         INPUT_AUDIO_REVISION: ${{ inputs.audio_revision }}
         INPUT_AUDIO_REPOSITORY_BRANCH: ${{ inputs.audio_repository_branch }}
+        INPUT_REFERENCE_PATH: ${{ inputs.reference_path }}
+        INPUT_COMPARISON_REPORT_PATH: ${{ inputs.comparison_report_path }}
+        INPUT_REFERENCE_REQUIRED: ${{ inputs.reference_required }}
+        INPUT_CAPTURE_REFERENCE: ${{ inputs.capture_reference }}
+        INPUT_MAX_WORD_ERROR_RATE: ${{ inputs.max_word_error_rate }}
         INPUT_COMMAND: ${{ inputs.command }}
         INPUT_CONFIG_PATH: ${{ inputs.config_path }}
         INPUT_VERBOSE: ${{ inputs.verbose }}
@@ -253,8 +296,15 @@ runs:
       run: |
         set -euo pipefail
 
+        EFFECTIVE_AUDIO_PATH="${INPUT_AUDIO_PATH:-${AUDIO_PATH:-./audio}}"
+        EFFECTIVE_TRANSCRIPT_PATH="${INPUT_TRANSCRIPT_PATH:-${TRANSCRIPT_PATH:-./transcriptions}}"
+        EFFECTIVE_MANIFEST_PATH="${INPUT_MANIFEST_PATH:-${MANIFEST_PATH:-./manifest.json}}"
+        EFFECTIVE_REFERENCE_PATH="${INPUT_REFERENCE_PATH:-${REFERENCE_PATH:-}}"
+        EFFECTIVE_COMPARISON_REPORT_PATH="${INPUT_COMPARISON_REPORT_PATH:-${COMPARISON_REPORT_PATH:-}}"
+        EFFECTIVE_MAX_WORD_ERROR_RATE="${INPUT_MAX_WORD_ERROR_RATE:-${MAX_WORD_ERROR_RATE:-0}}"
+
         case "$INPUT_COMMAND" in
-          run|download|transcribe|status) ;;
+          run|download|transcribe|verify|status) ;;
           *) echo "Unsupported OctoScribe command: $INPUT_COMMAND" >&2; exit 2 ;;
         esac
         case "$INPUT_SOURCE" in
@@ -262,24 +312,45 @@ runs:
           *) echo "Unsupported audio source: $INPUT_SOURCE" >&2; exit 2 ;;
         esac
 
-        if [ -n "$INPUT_DATA_REPO_PATH" ]; then
+        USE_LEGACY_PATHS=false
+        if { [ -n "$INPUT_DATA_REPO_PATH" ] || [ -n "$INPUT_AUDIO_REPO_PATH" ] || \
+             [ -n "$INPUT_TRANSCRIPT_REPO_PATH" ]; } && \
+           { [ "$EFFECTIVE_AUDIO_PATH" = './audio' ] || [ "$EFFECTIVE_AUDIO_PATH" = 'audio' ]; } && \
+           { [ "$EFFECTIVE_TRANSCRIPT_PATH" = './transcriptions' ] || [ "$EFFECTIVE_TRANSCRIPT_PATH" = 'transcriptions' ]; } && \
+           { [ "$EFFECTIVE_MANIFEST_PATH" = './manifest.json' ] || [ "$EFFECTIVE_MANIFEST_PATH" = 'manifest.json' ]; } && \
+           [ -z "$EFFECTIVE_REFERENCE_PATH" ] && [ -z "$EFFECTIVE_COMPARISON_REPORT_PATH" ]; then
+          USE_LEGACY_PATHS=true
+        fi
+
+        if [ "$USE_LEGACY_PATHS" = true ] && [ -n "$INPUT_DATA_REPO_PATH" ]; then
           if [ -n "$INPUT_AUDIO_REPO_PATH" ] || [ -n "$INPUT_TRANSCRIPT_REPO_PATH" ]; then
             echo 'Use data_repo_path alone, or use audio_repo_path and transcript_repo_path together.' >&2
             exit 2
           fi
-        elif [ -z "$INPUT_AUDIO_REPO_PATH" ] || [ -z "$INPUT_TRANSCRIPT_REPO_PATH" ]; then
+        elif [ "$USE_LEGACY_PATHS" = true ] && \
+             { [ -z "$INPUT_AUDIO_REPO_PATH" ] || [ -z "$INPUT_TRANSCRIPT_REPO_PATH" ]; }; then
           echo 'Supply data_repo_path, or supply both audio_repo_path and transcript_repo_path.' >&2
           exit 2
         fi
 
+        for BOOLEAN_INPUT in "$INPUT_REFERENCE_REQUIRED" "$INPUT_CAPTURE_REFERENCE"; do
+          case "$BOOLEAN_INPUT" in
+            true|false) ;;
+            *) echo 'reference_required and capture_reference must be true or false.' >&2; exit 2 ;;
+          esac
+        done
         python3 - "$INPUT_AUDIO_REVISION" "$INPUT_AUDIO_REPOSITORY_BRANCH" \
           "$INPUT_LOCAL_MODEL" "$INPUT_LOCAL_DEVICE" \
           "$INPUT_LOCAL_COMPUTE_TYPE" "$INPUT_DATA_REPO_PATH" \
-          "$INPUT_AUDIO_REPO_PATH" "$INPUT_TRANSCRIPT_REPO_PATH" <<'PY'
+          "$INPUT_AUDIO_REPO_PATH" "$INPUT_TRANSCRIPT_REPO_PATH" \
+          "$EFFECTIVE_AUDIO_PATH" "$EFFECTIVE_TRANSCRIPT_PATH" "$EFFECTIVE_MANIFEST_PATH" \
+          "$EFFECTIVE_REFERENCE_PATH" "$EFFECTIVE_COMPARISON_REPORT_PATH" <<'PY'
         import re
         import sys
         from pathlib import Path
-        revision, branch, model, device, compute_type, data_path, audio_path, text_path = sys.argv[1:]
+        (revision, branch, model, device, compute_type, data_path, audio_repo_path,
+         text_repo_path, audio_path, text_path, manifest_path, reference_path,
+         comparison_path) = sys.argv[1:]
         if revision and re.fullmatch(r"(?:[0-9A-Fa-f]{40}|[0-9A-Fa-f]{64})", revision) is None:
             raise SystemExit("audio_revision must be a 40- or 64-character hexadecimal hash")
         for name, value in (("local_model", model), ("local_device", device),
@@ -293,11 +364,16 @@ runs:
         if device not in {"cpu", "cuda", "auto"}:
             raise SystemExit("local_device must be cpu, cuda, or auto")
         for name, value in (("data_repo_path", data_path),
-                            ("audio_repo_path", audio_path),
-                            ("transcript_repo_path", text_path)):
+                            ("audio_repo_path", audio_repo_path),
+                            ("transcript_repo_path", text_repo_path),
+                            ("audio_path", audio_path),
+                            ("transcript_path", text_path),
+                            ("manifest_path", manifest_path),
+                            ("reference_path", reference_path),
+                            ("comparison_report_path", comparison_path)):
             if value and any(ord(character) < 32 or ord(character) == 127 for character in value):
                 raise SystemExit(f"{name} must not contain control characters")
-        if audio_path and Path(audio_path).resolve() == Path(text_path).resolve():
+        if audio_repo_path and Path(audio_repo_path).resolve() == Path(text_repo_path).resolve():
             raise SystemExit(
                 "audio_repo_path and transcript_repo_path must resolve to different paths; "
                 "use data_repo_path for a shared layout"
@@ -385,11 +461,21 @@ runs:
 
         CMD=(python3 "$OCTOSCRIBE_ACTION_PATH/octoscribe.py" --config "$CONFIG_PATH")
         if [ "$INPUT_VERBOSE" = 'true' ]; then CMD+=(--verbose); fi
-        if [ -n "$INPUT_DATA_REPO_PATH" ]; then
+        if [ "$USE_LEGACY_PATHS" = true ] && [ -n "$INPUT_DATA_REPO_PATH" ]; then
           CMD+=(--data-repo "$INPUT_DATA_REPO_PATH")
-        else
+        elif [ "$USE_LEGACY_PATHS" = true ]; then
           CMD+=(--audio-repo "$INPUT_AUDIO_REPO_PATH")
           CMD+=(--transcript-repo "$INPUT_TRANSCRIPT_REPO_PATH")
+        else
+          CMD+=(--audio-path "$EFFECTIVE_AUDIO_PATH")
+          CMD+=(--transcript-path "$EFFECTIVE_TRANSCRIPT_PATH")
+          CMD+=(--manifest-path "$EFFECTIVE_MANIFEST_PATH")
+          if [ -n "$EFFECTIVE_REFERENCE_PATH" ]; then
+            CMD+=(--reference-path "$EFFECTIVE_REFERENCE_PATH")
+          fi
+          if [ -n "$EFFECTIVE_COMPARISON_REPORT_PATH" ]; then
+            CMD+=(--comparison-report-path "$EFFECTIVE_COMPARISON_REPORT_PATH")
+          fi
         fi
         CMD+=("$INPUT_COMMAND")
         if [ "$USES_SOURCE" = true ]; then
@@ -415,13 +501,23 @@ runs:
           if [ -n "$INPUT_AUDIO_REPOSITORY_BRANCH" ]; then
             CMD+=(--audio-repository-branch "$INPUT_AUDIO_REPOSITORY_BRANCH")
           fi
+        elif [ "$INPUT_COMMAND" = 'verify' ]; then
+          CMD+=(--max-word-error-rate "$EFFECTIVE_MAX_WORD_ERROR_RATE")
+          if [ "$INPUT_REFERENCE_REQUIRED" = 'false' ]; then
+            CMD+=(--allow-missing-references)
+          fi
+          if [ "$INPUT_CAPTURE_REFERENCE" = 'true' ]; then
+            CMD+=(--capture-reference)
+          fi
         fi
 
         echo "OctoScribe command=$INPUT_COMMAND source=$INPUT_SOURCE"
-        if [ -n "$INPUT_DATA_REPO_PATH" ]; then
+        if [ "$USE_LEGACY_PATHS" = true ] && [ -n "$INPUT_DATA_REPO_PATH" ]; then
           echo "OctoScribe layout=shared data_path=$INPUT_DATA_REPO_PATH"
-        else
+        elif [ "$USE_LEGACY_PATHS" = true ]; then
           echo "OctoScribe layout=split audio_path=$INPUT_AUDIO_REPO_PATH transcript_path=$INPUT_TRANSCRIPT_REPO_PATH"
+        else
+          echo "OctoScribe paths audio=$EFFECTIVE_AUDIO_PATH transcripts=$EFFECTIVE_TRANSCRIPT_PATH manifest=$EFFECTIVE_MANIFEST_PATH"
         fi
         if [ "$INPUT_COMMAND" = 'run' ] || [ "$INPUT_COMMAND" = 'transcribe' ]; then
           echo "OctoScribe providers=${INPUT_PROVIDERS:-auto} primary=${INPUT_PRIMARY_PROVIDER:-auto} model=$TRANSCRIBE_MODEL language=$TRANSCRIBE_LANGUAGE"
@@ -432,19 +528,34 @@ runs:
         "${CMD[@]}"
 
         python3 - "$OCTOSCRIBE_ACTION_PATH" "$CONFIG_PATH" \
-          "$INPUT_DATA_REPO_PATH" "$INPUT_AUDIO_REPO_PATH" \
-          "$INPUT_TRANSCRIPT_REPO_PATH" "$GITHUB_OUTPUT" <<'PY'
+          "$USE_LEGACY_PATHS" "$INPUT_DATA_REPO_PATH" \
+          "$INPUT_AUDIO_REPO_PATH" "$INPUT_TRANSCRIPT_REPO_PATH" \
+          "$EFFECTIVE_AUDIO_PATH" "$EFFECTIVE_TRANSCRIPT_PATH" \
+          "$EFFECTIVE_MANIFEST_PATH" "$EFFECTIVE_REFERENCE_PATH" \
+          "$EFFECTIVE_COMPARISON_REPORT_PATH" "$GITHUB_OUTPUT" <<'PY'
         import sys
         from pathlib import Path
-        action_path, config_path, data_path, audio_path, text_path, output_file = sys.argv[1:]
+        (action_path, config_path, use_legacy, data_path, audio_repo_path,
+         text_repo_path, audio_path, transcript_path, manifest_path,
+         reference_path, comparison_path, output_file) = sys.argv[1:]
         sys.path.insert(0, action_path)
+        from octoscribe import direct_path_overrides
         from src.config import Config
-        overrides = {}
-        if data_path:
-            overrides["data_repo__path"] = data_path
+        if use_legacy == "true" and data_path:
+            overrides = {"data_repo__path": data_path}
+        elif use_legacy == "true":
+            overrides = {
+                "audio_repo__path": audio_repo_path,
+                "transcript_repo__path": text_repo_path,
+            }
         else:
-            overrides["audio_repo__path"] = audio_path
-            overrides["transcript_repo__path"] = text_path
+            overrides = direct_path_overrides(
+                audio_path=audio_path,
+                transcript_path=transcript_path,
+                manifest_path=manifest_path,
+                reference_path=reference_path or None,
+                comparison_report_path=comparison_path or None,
+            )
         config = Config.load(ini_path=config_path, validation_profile="status", **overrides)
         candidates = (config.transcribe.artifacts_dir
                       or config.transcribe.transcriptions_dir.parent / "candidates")
@@ -456,6 +567,7 @@ runs:
             "transcriptions_dir": config.transcribe.transcriptions_dir,
             "candidates_dir": candidates,
             "reports_dir": reports,
+            "comparison_reports_dir": config.transcribe.comparison_reports_dir,
         }
         with Path(output_file).open("a", encoding="utf-8") as handle:
             for name, value in resolved.items():

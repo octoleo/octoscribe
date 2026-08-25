@@ -433,11 +433,10 @@ class Transcriber:
                 if ensemble_outcome is not None
                 else ""
             )
-            target_dir = (
-                out_dir / "needs-review"
-                if quality_state == "needs_review"
-                else out_dir
-            )
+            # Quality warnings never quarantine or relocate completed work.
+            # The authoritative transcript always uses the configured normal
+            # output directory; evidence reports carry any warning details.
+            target_dir = out_dir
             target_dir.mkdir(parents=True, exist_ok=True)
             output_path = unique_filepath(target_dir, desired_name, msg_id)
             output_filename = str(output_path.relative_to(out_dir))
@@ -464,6 +463,7 @@ class Transcriber:
             }
             evidence_report = ""
             unresolved = 0
+            integrity_warnings: list[dict[str, object]] = []
             if ensemble_outcome is not None:
                 quality_state = ensemble_outcome.quality_state.value
                 if ensemble_outcome.evidence_report_path:
@@ -478,6 +478,22 @@ class Transcriber:
                     except ValueError:
                         evidence_report = str(report_path)
                 unresolved = ensemble_outcome.unresolved_discrepancies
+                if unresolved:
+                    integrity_warnings.append(
+                        {
+                            "kind": "provider_disagreement",
+                            "count": unresolved,
+                        }
+                    )
+                integrity_warnings.extend(
+                    {
+                        "kind": "unaligned_seam",
+                        "left_chunk": seam.left_chunk,
+                        "right_chunk": seam.right_chunk,
+                    }
+                    for seam in ensemble_outcome.seams
+                    if seam.alignment is None
+                )
                 ensemble_manifest: dict[str, object] = {
                     "quality_state": quality_state,
                     "providers": list(self._config.transcribe.providers),
@@ -507,16 +523,36 @@ class Transcriber:
                 ]
                 if provider_failures:
                     ensemble_manifest["provider_failures"] = provider_failures
+                    integrity_warnings.extend(
+                        {"kind": "provider_failure", **failure}
+                        for failure in provider_failures
+                    )
+                if (
+                    quality_state == "completed_with_warnings"
+                    and not integrity_warnings
+                ):
+                    # Defensive fallback: this state must never be opaque, even
+                    # if a future ensemble path omits its specific warning.
+                    integrity_warnings.append(
+                        {"kind": "automated_comparison_incomplete"}
+                    )
+                ensemble_manifest["integrity_warnings"] = integrity_warnings
                 manifest_result.update(ensemble_manifest)
             self._manifest.mark_transcribed(msg_id, manifest_result)
 
             log.info(
                 "Transcription result: input=%s output=%s quality=%s "
-                "unresolved_discrepancies=%d report=%s elapsed=%.1fs",
+                "unresolved_discrepancies=%d integrity_warnings=%d "
+                "warning_kinds=%s report=%s elapsed=%.1fs",
                 filename,
                 output_filename,
                 quality_state or "machine_transcribed",
                 unresolved,
+                len(integrity_warnings),
+                ",".join(
+                    str(warning["kind"]) for warning in integrity_warnings
+                )
+                or "(none)",
                 evidence_report or "(none)",
                 elapsed,
             )

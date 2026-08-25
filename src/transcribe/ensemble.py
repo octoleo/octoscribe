@@ -134,7 +134,7 @@ class EnsembleOutcome:
             len(chunk.comparison.discrepancies)
             for chunk in self.chunks
             if (
-                chunk.quality_state is QualityState.NEEDS_REVIEW
+                chunk.quality_state is QualityState.COMPLETED_WITH_WARNINGS
                 and chunk.comparison is not None
                 and not chunk.comparison.all_agree
             )
@@ -444,7 +444,7 @@ class EnsembleEngine:
                 return ChunkOutcome(
                     chunk=chunk,
                     canonical_text=primary_attempt.transcript.text,
-                    quality_state=QualityState.NEEDS_REVIEW,
+                    quality_state=QualityState.COMPLETED_WITH_WARNINGS,
                     attempts=tuple(attempts),
                     failures=tuple(failures),
                     comparison=report,
@@ -527,7 +527,7 @@ class EnsembleEngine:
         return ChunkOutcome(
             chunk=chunk,
             canonical_text=primary_attempt.transcript.text,
-            quality_state=QualityState.NEEDS_REVIEW,
+            quality_state=QualityState.COMPLETED_WITH_WARNINGS,
             attempts=tuple(attempts),
             failures=tuple(failures),
             comparison=report,
@@ -646,7 +646,7 @@ class EnsembleEngine:
             quality_state=(
                 QualityState.CROSS_CHECKED
                 if primary_verified
-                else QualityState.NEEDS_REVIEW
+                else QualityState.COMPLETED_WITH_WARNINGS
             ),
             attempts=tuple(attempts),
             failures=tuple(failures),
@@ -694,12 +694,15 @@ class EnsembleEngine:
         chunks: tuple[ChunkOutcome, ...],
         seams: tuple[SeamEvidence, ...],
     ) -> QualityState:
-        if any(chunk.quality_state is QualityState.NEEDS_REVIEW for chunk in chunks):
-            return QualityState.NEEDS_REVIEW
+        if any(
+            chunk.quality_state is QualityState.COMPLETED_WITH_WARNINGS
+            for chunk in chunks
+        ):
+            return QualityState.COMPLETED_WITH_WARNINGS
         if self._config.chunk_overlap_seconds and any(
             seam.alignment is None for seam in seams
         ):
-            return QualityState.NEEDS_REVIEW
+            return QualityState.COMPLETED_WITH_WARNINGS
         if len(self._providers) == 1:
             return QualityState.MACHINE_TRANSCRIBED
         return QualityState.CROSS_CHECKED

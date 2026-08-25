@@ -4,12 +4,12 @@
 #
 # Install all dependencies into a virtual environment:
 #
-#   python3.11 -m venv .venv
+#   python3.14 -m venv .venv
 #   source .venv/bin/activate
 #   pip install -r requirements.txt
 #
-# Minimum versions are pinned for reproducibility. Use `pip install --upgrade`
-# or bump versions here when you need newer features.
+# Dependencies use minimum-version lower bounds rather than an exact lock.
+# Normal installs therefore resolve newer compatible releases.
 # =============================================================================
 
 
@@ -36,3 +36,4 @@ tqdm>=4.66.0
 # Audio metadata (duration, bitrate, codec) without decoding the full file.
 # https://github.com/quodlibet/mutagen
 mutagen>=1.47.0
+
