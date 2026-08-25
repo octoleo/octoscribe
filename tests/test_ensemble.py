@@ -141,7 +141,7 @@ def test_third_provider_cannot_outvote_or_rewrite_primary(tmp_path: Path) -> Non
     ).transcribe(_audio(tmp_path))
 
     assert outcome.text == "one"
-    assert outcome.quality_state is QualityState.NEEDS_REVIEW
+    assert outcome.quality_state is QualityState.COMPLETED_WITH_WARNINGS
     assert [backends[name].calls for name in ("openai", "xai", "meta")] == [
         2,
         2,
@@ -160,7 +160,7 @@ def test_persistent_two_provider_disagreement_has_a_hard_stop(tmp_path: Path) ->
     ).transcribe(_audio(tmp_path))
 
     assert outcome.text == "one"
-    assert outcome.quality_state is QualityState.NEEDS_REVIEW
+    assert outcome.quality_state is QualityState.COMPLETED_WITH_WARNINGS
     assert [backend.calls for backend in backends.values()] == [2, 2]
     assert [item.stage for item in outcome.chunks[0].comparison_history] == [
         "initial",
@@ -232,7 +232,7 @@ def test_fallback_checker_disagreement_retries_only_active_pair(
     ).transcribe(_audio(tmp_path))
 
     assert outcome.text == "one"
-    assert outcome.quality_state is QualityState.NEEDS_REVIEW
+    assert outcome.quality_state is QualityState.COMPLETED_WITH_WARNINGS
     assert [backends[name].calls for name in ("openai", "xai", "meta")] == [2, 1, 2]
     assert [item.stage for item in outcome.chunks[0].comparison_history] == [
         "fallback_checker",
@@ -251,7 +251,7 @@ def test_failed_fallback_is_not_invoked_again_as_arbiter(tmp_path: Path) -> None
     ).transcribe(_audio(tmp_path))
 
     assert outcome.text == "one"
-    assert outcome.quality_state is QualityState.NEEDS_REVIEW
+    assert outcome.quality_state is QualityState.COMPLETED_WITH_WARNINGS
     assert [backends[name].calls for name in ("openai", "xai", "meta")] == [2, 2, 1]
     assert [item.stage for item in outcome.chunks[0].comparison_history] == [
         "availability_retry"
@@ -276,7 +276,7 @@ def test_secondary_outage_preserves_primary_but_downgrades(tmp_path: Path) -> No
         _config(("openai", "xai")), backends, audio_tools=_AudioTools()
     ).transcribe(_audio(tmp_path))
     assert outcome.text == "Primary evidence."
-    assert outcome.quality_state is QualityState.NEEDS_REVIEW
+    assert outcome.quality_state is QualityState.COMPLETED_WITH_WARNINGS
     assert "offline" in outcome.chunks[0].failures[0].error
 
 
@@ -306,14 +306,14 @@ def test_exact_overlap_is_removed_without_rewriting_primary(tmp_path: Path) -> N
     assert outcome.seams[0].alignment is not None
 
 
-def test_unresolved_seam_is_needs_review(tmp_path: Path) -> None:
+def test_unresolved_seam_completes_with_warnings(tmp_path: Path) -> None:
     backend = _Backend("openai", ["First ending.", "Unrelated opening."])
     outcome = EnsembleEngine(
         _config(),
         {"openai": backend},
         audio_tools=_AudioTools(duration_ms=1_200_000, chunk_count=2),
     ).transcribe(_audio(tmp_path))
-    assert outcome.quality_state is QualityState.NEEDS_REVIEW
+    assert outcome.quality_state is QualityState.COMPLETED_WITH_WARNINGS
     assert outcome.seams[0].alignment is None
 
 

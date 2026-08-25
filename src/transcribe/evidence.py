@@ -337,7 +337,7 @@ class ChunkEvidence:
 
 @dataclass(frozen=True, slots=True)
 class DiscrepancySummary:
-    """Exact token spans retained so a reviewer can locate each disagreement."""
+    """Exact token spans retained so each warning can be located precisely."""
 
     kind: str
     priority: str

@@ -22,7 +22,8 @@ _TERMINAL_TRANSCRIPTION_STATES = frozenset(
         "completed",  # legacy manifests
         "machine_transcribed",
         "cross_checked",
-        "needs_review",
+        "completed_with_warnings",
+        "needs_review",  # legacy state; accepted as terminal when loading
         "human_verified",
     }
 )
@@ -285,7 +286,8 @@ class Manifest:
             result = {
                 "machine_transcribed": 0,
                 "cross_checked": 0,
-                "needs_review": 0,
+                "completed_with_warnings": 0,
+                "legacy_needs_review": 0,
                 "human_verified": 0,
                 "legacy_completed": 0,
             }
@@ -294,7 +296,12 @@ class Manifest:
                 if not isinstance(transcription, dict):
                     continue
                 state = transcription.get("status")
-                key = "legacy_completed" if state == "completed" else state
+                if state == "completed":
+                    key = "legacy_completed"
+                elif state == "needs_review":
+                    key = "legacy_needs_review"
+                else:
+                    key = state
                 if key in result:
                     result[key] += 1
             return result

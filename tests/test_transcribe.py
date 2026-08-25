@@ -744,13 +744,21 @@ def test_transcriber_run_batch_stats_counts(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 def test_batch_stats_summary():
-    s = BatchStats(total=10, succeeded=8, failed=2, skipped=1, total_elapsed_seconds=42.5)
+    s = BatchStats(
+        total=10,
+        succeeded=8,
+        failed=2,
+        skipped=1,
+        total_elapsed_seconds=42.5,
+        completed_with_warnings=1,
+    )
     summary = s.summary()
     assert isinstance(summary, str)
     assert len(summary) > 0
     assert "10" in summary
     assert "8" in summary
     assert "2" in summary
+    assert "completed_with_warnings=1" in summary
 
 
 # ---------------------------------------------------------------------------

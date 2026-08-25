@@ -94,7 +94,7 @@ def _report(
     audio: AudioEvidence,
     chunk: ChunkEvidence,
     *,
-    quality: QualityState = QualityState.NEEDS_REVIEW,
+    quality: QualityState = QualityState.COMPLETED_WITH_WARNINGS,
 ) -> EvidenceReport:
     return EvidenceReport(
         audio=audio,
@@ -213,7 +213,7 @@ def test_report_records_chunks_attempts_comparisons_and_quality(tmp_path: Path) 
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload["schema_version"] == SCHEMA_VERSION
     assert payload["kind"] == "transcription_evidence_report"
-    assert payload["final_quality_state"] == "needs_review"
+    assert payload["final_quality_state"] == "completed_with_warnings"
     assert [attempt["provider"] for attempt in payload["chunks"][0]["attempts"]] == [
         "local",
         "openai",
